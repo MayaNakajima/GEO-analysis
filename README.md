@@ -24,19 +24,19 @@
 
 ## 使い方
 
-Python 標準ライブラリのみで動作します（追加インストール不要）。
+Python 標準ライブラリのみで動作します（追加インストール不要）。実行は **Anaconda Prompt** から。
 
-```bash
-# 1) config.json のパスを自分の環境に合わせて確認
-# 2) 生成
+```bat
+REM 1) config.json のパスを自分の環境に合わせて確認
+REM 2) フォルダへ移動して生成
+cd /d C:\Users\612316\Documents\GitHub\GEO-analysis
 python generate.py
 
-# パスを直接指定する場合
-python generate.py \
-  --results-dir "C:\Users\612316\Downloads\06_GEO\monitoring\data\results" \
-  --reference   "C:\Users\612316\Downloads\06_GEO\Set2_実績スクレイピング_reference.md" \
-  --out         "analysis.html"
+REM パスを直接指定する場合（1行）
+python generate.py --results-dir "C:\Users\612316\Downloads\06_GEO\monitoring\data\results" --reference "C:\Users\612316\Downloads\06_GEO\Set2_実績スクレイピング_reference.md" --out "C:\Users\612316\Documents\GitHub\GEO-analysis\analysis.html"
 ```
+
+> 実行手順の詳細（Anaconda Prompt の起動・パス一覧・トラブルシューティング）は `docs/実行手順書_v1.md` を参照。
 
 生成された `analysis.html` をブラウザで開くだけで動きます（外部依存は CDN の Chart.js のみ）。
 CSV を再測定・追加したら `python generate.py` を再実行すれば最新データで更新されます。
