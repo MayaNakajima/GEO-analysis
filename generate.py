@@ -97,6 +97,28 @@ def load_config(path):
     return cfg
 
 
+_fn_re = re.compile(r'results_(\d{8})_(\d{6})_r(\d+)\.csv', re.I)
+
+
+def parse_run(fn):
+    """ファイル名 results_YYYYMMDD_HHMMSS_rN.csv から回情報を解析。
+    返り値: timing_id, run_no, run_key, run_label, timing_label"""
+    m = _fn_re.search(fn)
+    if not m:
+        # 想定外の名前でも動くようフォールバック（ファイル名そのものを回として扱う）
+        base = fn.replace("results_", "").replace(".csv", "")
+        return base, "1", base, base, base
+    ymd, hms, rn = m.group(1), m.group(2), m.group(3)
+    timing_id = f"{ymd}_{hms}"
+    try:
+        dt = datetime.strptime(timing_id, "%Y%m%d_%H%M%S")
+        tlabel = dt.strftime("%m-%d %H:%M")
+    except Exception:
+        tlabel = timing_id
+    run_key = f"{timing_id}_r{rn}"
+    return timing_id, rn, run_key, f"{tlabel} r{rn}", tlabel
+
+
 def load_rows(results_dir):
     files = sorted(glob.glob(os.path.join(results_dir, "results_*.csv")))
     if not files:
@@ -105,6 +127,7 @@ def load_rows(results_dir):
     files_meta = []
     for fp in files:
         fn = os.path.basename(fp)
+        timing_id, run_no, run_key, run_label, timing_label = parse_run(fn)
         with open(fp, encoding="utf-8-sig") as fh:
             reader = csv.DictReader(fh)
             n = 0
@@ -116,6 +139,11 @@ def load_rows(results_dir):
                 hit = str(r.get("mention_detected", "")).strip().lower() == "true"
                 row = {
                     "file": fn,
+                    "run": run_key,
+                    "run_label": run_label,
+                    "run_no": run_no,
+                    "timing": timing_id,
+                    "timing_label": timing_label,
                     "run_date": (r.get("run_date") or "").strip(),
                     "run_ts": (r.get("run_timestamp") or "").strip(),
                     "qid": (r.get("question_id") or "").strip(),
@@ -258,6 +286,17 @@ def build_payload(rows, files_meta, ref, cfg):
     sets = sorted({r["set"] for r in rows if r["set"]})
     tiers = [t for t in ["D1", "D2", "D3", "D4"] if any(r["tier"] == t for r in rows)]
 
+    # 回（run）・タイミング（timing）を時系列順に整理（キーは YYYYMMDD_HHMMSS で自然に昇順）
+    run_keys = sorted({r["run"] for r in rows})
+    run_labels = {r["run"]: r["run_label"] for r in rows}
+    timing_keys = sorted({r["timing"] for r in rows})
+    timing_labels = {r["timing"]: r["timing_label"] for r in rows}
+    # 各タイミングに含まれる run 数（比較ビューの注記用）
+    timing_runs = {}
+    for r in rows:
+        timing_runs.setdefault(r["timing"], set()).add(r["run"])
+    timing_runs = {k: sorted(v) for k, v in timing_runs.items()}
+
     payload = {
         "meta": {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -276,11 +315,16 @@ def build_payload(rows, files_meta, ref, cfg):
             "stakeholders": stakeholders, "stakeholder_labels": stakeholder_labels,
             "models": models, "sets": sets, "tiers": tiers,
             "tier_labels": TIER_LABELS,
+            "runs": run_keys, "run_labels": run_labels,
+            "timings": timing_keys, "timing_labels": timing_labels,
+            "timing_runs": timing_runs,
         },
         "rows": [
             {
                 "i": idx,
                 "file": r["file"], "date": r["run_date"], "ts": r["run_ts"],
+                "run": r["run"], "run_label": r["run_label"],
+                "timing": r["timing"], "timing_label": r["timing_label"],
                 "qid": r["qid"], "domain": r["domain"], "domain_label": r["domain_label"],
                 "type": r["type"], "type_label": r["type_label"],
                 "stakeholder": r["stakeholder"], "stakeholder_label": r["stakeholder_label"],
@@ -460,6 +504,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="muted" style="margin-top:8px">セル = 出現率（ヒット数 / 該当行数）。0% でも該当行があればクリックで回答を確認できます。</div>
   </section>
 
+  <!-- 過去回比較 -->
+  <section id="s-compare">
+    <div class="summary" id="compare-summary"></div>
+    <details class="howto"><summary>この画面の見方</summary>
+      <div class="body">2つの回（A=過去 / B=比較）を選び、A→B の変化を見ます。粒度は
+        <b>run</b>（ファイル1つ＝1回。r1/r2 を個別に）と <b>timing</b>（同一タイミングの r1/r2 をまとめて平均）から選べます。
+        見られるもの：全体・ドメイン別・特異度別の出現率デルタ／競合の増減（新規登場・消失）／質問の反転（出た↔消えた）。
+        反転質問はクリックで A と B の回答全文を並べて比較できます。</div>
+    </details>
+    <div class="filters" id="filters-compare"></div>
+    <div class="grid g2">
+      <div class="card"><h3>全体・軸別の出現率デルタ（A→B）</h3><div id="cmp-rates"></div></div>
+      <div class="card"><h3>競合の増減（登場回答数 A→B）</h3><div id="cmp-comp"></div></div>
+    </div>
+    <h2>質問の反転（出た↔消えた）</h2>
+    <div class="card"><div id="cmp-flip"></div></div>
+  </section>
+
   <!-- P2: 引用URL -->
   <section id="s-url">
     <div class="summary" id="url-summary"></div>
@@ -510,6 +572,7 @@ $("#hdr-sub").innerHTML =
 // ── タブ
 const TABS = [
   ["s-comp","競合共起 (P1)"],["s-cross","多軸クロス集計 (P1)"],
+  ["s-compare","過去回比較"],
   ["s-url","引用URL (P2)"],["s-self","自社突合 (P2)"],["s-p3","競合サイト (P3)"]
 ];
 const tabsEl = $("#tabs");
@@ -517,29 +580,36 @@ TABS.forEach(([id,label],i)=>{
   const b=document.createElement("div"); b.className="tab"+(i===0?" active":""); b.textContent=label;
   b.onclick=()=>{ $$(".tab").forEach(t=>t.classList.remove("active")); b.classList.add("active");
     $$("section").forEach(s=>s.classList.remove("active")); $("#"+id).classList.add("active");
-    if(id==="s-comp") renderComp(); if(id==="s-cross") renderCross(); };
+    if(id==="s-comp") renderComp(); if(id==="s-cross") renderCross(); if(id==="s-compare") renderCompare(); };
   tabsEl.appendChild(b);
 });
 
 // ── フィルタ UI（各タブに独立生成）
 const FSTATE = {comp:{},cross:{},url:{}};
 function optionSet(){ return {
-  date:["期間",D.dates], domain:["ドメイン",D.domains],
+  timing:["タイミング",D.timings], run:["回(run)",D.runs],
+  date:["実行日",D.dates], domain:["ドメイン",D.domains],
   tier:["特異度",D.tiers], set:["質問セット",D.sets], model:["モデル",D.models]
 };}
+function optLabel(k,v){
+  if(k==="tier") return `${v} ${D.tier_labels[v]||""}`;
+  if(k==="domain") return `${v}｜${D.domain_labels[v]||""}`;
+  if(k==="timing") return D.timing_labels[v]||v;
+  if(k==="run") return D.run_labels[v]||v;
+  return v;
+}
 function buildFilters(mountId, key, onchange, extra=[]){
   const mount=$("#"+mountId); mount.innerHTML="";
   const opts=optionSet();
-  const order = ["date","domain","tier","set","model"];
+  const order = ["timing","run","date","domain","tier","set","model"];
   order.forEach(k=>{
     const [label,vals]=opts[k];
+    if(!vals || !vals.length) return;
     const f=document.createElement("div"); f.className="f";
     const lab=document.createElement("label"); lab.textContent=label;
     const sel=document.createElement("select"); sel.dataset.k=k;
-    sel.innerHTML=`<option value="">すべて</option>`+vals.map(v=>{
-      let t=v; if(k==="tier") t=`${v} ${D.tier_labels[v]||""}`;
-      if(k==="domain") t=`${v}｜${esc(D.domain_labels[v]||"")}`;
-      return `<option value="${esc(v)}">${esc(t)}</option>`;}).join("");
+    sel.innerHTML=`<option value="">すべて</option>`+vals.map(v=>
+      `<option value="${esc(v)}">${esc(optLabel(k,v))}</option>`).join("");
     sel.value = FSTATE[key][k]||"";
     sel.onchange=()=>{ FSTATE[key][k]=sel.value; onchange(); };
     f.appendChild(lab); f.appendChild(sel); mount.appendChild(f);
@@ -551,6 +621,8 @@ function buildFilters(mountId, key, onchange, extra=[]){
   rf.appendChild(document.createElement("label")); rf.appendChild(rb); mount.appendChild(rf);
 }
 function passFilter(r, st){
+  if(st.timing && r.timing!==st.timing) return false;
+  if(st.run && r.run!==st.run) return false;
   if(st.date && r.date!==st.date) return false;
   if(st.domain && r.domain!==st.domain) return false;
   if(st.tier && r.tier!==st.tier) return false;
@@ -625,11 +697,12 @@ function showCompRows(name){
 }
 
 // ─────────────────────────────────────────── P1 クロス集計
-const AXES = {domain:"ドメイン",tier:"特異度",type:"質問タイプ",stakeholder:"ステークホルダー",model:"モデル",date:"実行日",set:"質問セット"};
+const AXES = {run:"回(run)",timing:"タイミング",domain:"ドメイン",tier:"特異度",type:"質問タイプ",stakeholder:"ステークホルダー",model:"モデル",date:"実行日",set:"質問セット"};
 function axisVals(ax){
   if(ax==="domain")return D.domains; if(ax==="tier")return D.tiers;
   if(ax==="type")return D.types; if(ax==="stakeholder")return D.stakeholders;
   if(ax==="model")return D.models; if(ax==="date")return D.dates; if(ax==="set")return D.sets;
+  if(ax==="run")return D.runs; if(ax==="timing")return D.timings;
   return [];
 }
 function axisLabel(ax,v){
@@ -637,6 +710,8 @@ function axisLabel(ax,v){
   if(ax==="tier")return `${v} ${D.tier_labels[v]||""}`;
   if(ax==="type")return `${v}｜${D.type_labels[v]||""}`;
   if(ax==="stakeholder")return `${v}｜${D.stakeholder_labels[v]||""}`;
+  if(ax==="run")return D.run_labels[v]||v;
+  if(ax==="timing")return D.timing_labels[v]||v;
   return v;
 }
 function renderCross(){
@@ -776,9 +851,125 @@ function showAnswer(i){
   openModal(body);
 }
 
+// ─────────────────────────────────────────── 過去回比較
+function cmpUnits(gran){ return gran==="timing" ? D.timings : D.runs; }
+function cmpLabel(gran,key){ return gran==="timing" ? (D.timing_labels[key]||key) : (D.run_labels[key]||key); }
+function cmpRows(gran,key){ return ROWS.filter(r => (gran==="timing"?r.timing:r.run)===key); }
+function dpt(d){ // デルタ表示（pt）
+  if(d==null) return `<span class="flat">–</span>`;
+  if(d>0) return `<span style="color:var(--good)">▲ +${d}pt</span>`;
+  if(d<0) return `<span style="color:var(--bad)">▼ ${d}pt</span>`;
+  return `<span class="muted">± 0pt</span>`;
+}
+function compAgg(rows){ // 競合名 -> 登場回答数（未言及回答のみ）
+  const m={}; rows.forEach(r=>{ if(!r.hit)(r.comp||[]).forEach(n=>m[n]=(m[n]||0)+1); }); return m; }
+function byQid(rows){ // qid -> {hit:bool, idxs:[], rep:i}
+  const m={};
+  rows.forEach(r=>{ const o=m[r.qid]||(m[r.qid]={hit:false,idxs:[],rep:null,q:r.question,domain:r.domain,tier:r.tier});
+    o.idxs.push(r.i); if(r.hit){o.hit=true; if(o.rep==null)o.rep=r.i;} });
+  Object.values(m).forEach(o=>{ if(o.rep==null)o.rep=o.idxs[0]; });
+  return m;
+}
+function renderCompare(){
+  const st=FSTATE.compare;
+  const gran=st.gran||"run";
+  const units=cmpUnits(gran);
+  if(units.length<2){
+    $("#compare-summary").innerHTML=`比較には2回以上の実行が必要です（現在 ${units.length} ${gran}）。`;
+    ["cmp-rates","cmp-comp","cmp-flip"].forEach(id=>$("#"+id).innerHTML="");
+    return;
+  }
+  let A=st.A, B=st.B;
+  if(!units.includes(A)) A=units[units.length-2];
+  if(!units.includes(B)) B=units[units.length-1];
+  st.A=A; st.B=B; st.gran=gran;
+  const ra=cmpRows(gran,A), rb=cmpRows(gran,B);
+  const rA=rate(ra), rB=rate(rb);
+  const dOverall = (rA!=null&&rB!=null)?Math.round((rB-rA)*10)/10:null;
+  $("#compare-summary").innerHTML =
+    `<b>${esc(cmpLabel(gran,A))}</b>（${ra.filter(r=>r.hit).length}/${ra.length}・${rA}%）→ `
+    +`<b>${esc(cmpLabel(gran,B))}</b>（${rb.filter(r=>r.hit).length}/${rb.length}・${rB}%）　全体 ${dpt(dOverall)}`;
+  // 軸別デルタ（ドメイン→特異度）
+  const axisTable=(ax,vals)=>{
+    const rowsH=vals.filter(v=>ra.some(r=>r[ax]===v)||rb.some(r=>r[ax]===v)).map(v=>{
+      const a=rate(ra.filter(r=>r[ax]===v)), b=rate(rb.filter(r=>r[ax]===v));
+      const d=(a!=null&&b!=null)?Math.round((b-a)*10)/10:null;
+      return `<tr><td>${esc(axisLabel(ax,v))}</td><td class="rate">${a==null?"–":a+"%"}</td>
+        <td class="rate">${b==null?"–":b+"%"}</td><td class="rate">${dpt(d)}</td></tr>`;}).join("");
+    return `<table><thead><tr><th>${AXES[ax]}</th><th>A</th><th>B</th><th>Δ</th></tr></thead><tbody>${rowsH}</tbody></table>`;
+  };
+  let ratesHtml=`<div class="muted" style="margin:2px 0 8px">ドメイン別</div>`+axisTable("domain",D.domains);
+  if(D.tiers.length) ratesHtml+=`<div class="muted" style="margin:14px 0 8px">特異度ティア別（Set2）</div>`+axisTable("tier",D.tiers);
+  $("#cmp-rates").innerHTML=ratesHtml;
+  // 競合の増減
+  const ca=compAgg(ra), cb=compAgg(rb);
+  const names=[...new Set([...Object.keys(ca),...Object.keys(cb)])];
+  const comp=names.map(n=>({n,a:ca[n]||0,b:cb[n]||0,d:(cb[n]||0)-(ca[n]||0)}))
+    .sort((x,y)=>Math.abs(y.d)-Math.abs(x.d)||y.b-x.b).slice(0,25);
+  $("#cmp-comp").innerHTML = comp.length
+    ? `<table><thead><tr><th>競合候補</th><th>A</th><th>B</th><th>Δ</th><th></th></tr></thead><tbody>`
+      + comp.map(c=>`<tr><td>${esc(c.n)}</td><td class="rate">${c.a}</td><td class="rate">${c.b}</td>
+          <td class="rate">${c.d>0?'<span style="color:var(--bad)">+'+c.d+'</span>':(c.d<0?'<span style="color:var(--good)">'+c.d+'</span>':'0')}</td>
+          <td>${c.a===0?'<span class="pill bad">新規</span>':(c.b===0?'<span class="pill good">消失</span>':'')}</td></tr>`).join("")
+      + `</tbody></table><div class="muted" style="margin-top:6px">競合の登場が増える(＋・赤)＝負けが拡大、減る(－・緑)＝改善の可能性。</div>`
+    : `<div class="muted">競合候補なし</div>`;
+  // 質問の反転
+  const qa=byQid(ra), qb=byQid(rb);
+  const common=Object.keys(qa).filter(q=>q in qb);
+  const gained=[], lost=[], stayHit=[], stayMiss=[];
+  common.forEach(q=>{ const a=qa[q].hit, b=qb[q].hit;
+    if(!a&&b) gained.push(q); else if(a&&!b) lost.push(q);
+    else if(a&&b) stayHit.push(q); else stayMiss.push(q); });
+  const flipRow=(q,kind)=>{ const o=qb[q]||qa[q];
+    return `<tr class="click" onclick='showFlip(${JSON.stringify(q)},${JSON.stringify(qa[q].rep)},${JSON.stringify(qb[q].rep)})'>
+      <td>${kind}</td><td><b>${esc(q)}</b></td><td class="muted">${esc((o.q||"").slice(0,54))}</td>
+      <td>${esc(o.domain)}${o.tier?(" / "+o.tier):""}</td><td class="muted">A/B比較 ›</td></tr>`; };
+  const rowsHtml = [...gained.map(q=>flipRow(q,'<span class="tagH">出た↑</span>')),
+                    ...lost.map(q=>flipRow(q,'<span class="tagM">消えた↓</span>'))].join("");
+  $("#cmp-flip").innerHTML =
+    `<div class="muted" style="margin-bottom:8px">共通質問 ${common.length}件：
+      <span class="tagH">出た↑ ${gained.length}</span> ／ <span class="tagM">消えた↓ ${lost.length}</span> ／
+      出続け ${stayHit.length} ／ 消え続け ${stayMiss.length}</div>`
+    + (rowsHtml
+      ? `<table><thead><tr><th>変化</th><th>質問ID</th><th>質問</th><th>領域</th><th></th></tr></thead><tbody>${rowsHtml}</tbody></table>`
+      : `<div class="muted">反転した質問はありません（両回とも同じ結果）。</div>`);
+}
+function showFlip(qid, ia, ib){
+  const A=ROWS[ia], B=ROWS[ib];
+  const block=(lbl,r)=> r ? `<div style="margin-bottom:6px"><span class="pill">${esc(lbl)}: ${esc(r.run_label)}</span>
+      <span class="${r.hit?'tagH':'tagM'}">${r.hit?'● 言及あり':'× 未言及'}</span>
+      ${(r.comp&&r.comp.length)?' 競合: '+r.comp.slice(0,6).map(n=>`<span class="pill bad">${esc(n)}</span>`).join(''):''}</div>
+      <div class="answer" style="max-height:34vh">${esc(r.answer)}</div>` : `<div class="muted">${esc(lbl)}: 該当なし</div>`;
+  openModal(`<h3>${esc(qid)}｜A→B 回答比較</h3>
+    <div class="meta">${esc((A||B).question)}</div>
+    <div style="margin-top:8px">${block("A",A)}</div>
+    <div style="margin-top:14px">${block("B",B)}</div>`);
+}
+
 // ── init
 buildFilters("filters-comp","comp",renderComp);
 buildFilters("filters-url","url",renderUrl);
+// 過去回比較：粒度・A・B セレクタ
+FSTATE.compare = {gran:"run"};
+(function(){
+  const mount=$("#filters-compare");
+  const mkSel=(label,onchange,build)=>{ const f=document.createElement("div"); f.className="f";
+    const lab=document.createElement("label"); lab.textContent=label;
+    const sel=document.createElement("select"); build(sel); sel.onchange=()=>onchange(sel.value);
+    f.appendChild(lab); f.appendChild(sel); mount.appendChild(f); return sel; };
+  let selA, selB;
+  const fillAB=()=>{ const g=FSTATE.compare.gran, u=cmpUnits(g);
+    const opt=k=>`<option value="${esc(k)}">${esc(cmpLabel(g,k))}</option>`;
+    selA.innerHTML=u.map(opt).join(""); selB.innerHTML=u.map(opt).join("");
+    FSTATE.compare.A=u[u.length-2]||u[0]; FSTATE.compare.B=u[u.length-1];
+    selA.value=FSTATE.compare.A; selB.value=FSTATE.compare.B; };
+  mkSel("粒度",v=>{FSTATE.compare.gran=v; fillAB(); renderCompare();},sel=>{
+    sel.innerHTML=`<option value="run">run（ファイル1つ＝1回）</option><option value="timing">timing（r1/r2をまとめ）</option>`;
+    sel.value="run";});
+  selA=mkSel("A（過去）",v=>{FSTATE.compare.A=v; renderCompare();},()=>{});
+  selB=mkSel("B（比較）",v=>{FSTATE.compare.B=v; renderCompare();},()=>{});
+  fillAB();
+})();
 // クロス集計は軸セレクタを追加
 (function(){
   const mk=(k,def)=>{ const f=document.createElement("div"); f.className="f";
@@ -790,7 +981,7 @@ buildFilters("filters-url","url",renderUrl);
   const extra=[mk("_rax","domain"),mk("_cax","tier")];
   buildFilters("filters-cross","cross",renderCross,extra);
 })();
-renderComp(); renderCross(); renderUrl(); renderSelf();
+renderComp(); renderCross(); renderUrl(); renderSelf(); renderCompare();
 </script>
 </body>
 </html>
