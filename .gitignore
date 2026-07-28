@@ -1,0 +1,15 @@
+# 生成物（generate.py で再生成可能・回答全文を含むため配布しない）
+analysis.html
+
+# 検証用一時ファイル
+_check.js
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
