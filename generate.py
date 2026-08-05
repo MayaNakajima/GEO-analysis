@@ -81,6 +81,70 @@ TIER_LABELS = {
     "": "（Set1・未分類）",
 }
 
+# ────────────────────────────────────────────────────────────────
+# 回答コンテキスト分析（オフライン・ヒューリスティック）
+# ────────────────────────────────────────────────────────────────
+# 回答タイプ（1回答を1つに分類）
+ATYPE_LABELS = {
+    "list": "社名列挙型",       # 具体的な企業名を2社以上挙げている
+    "general": "一般論型",      # 具体名を出さず一般論・観点だけ述べる
+    "refusal": "留保・拒否型",  # 「特定の社名は控える／把握していない」等の留保
+    "empty": "空回答",
+    "error": "エラー",          # ERROR:（APIキー未設定等の空振り）
+}
+
+# 「具体名を出さない／答えを留保する」ことを示すフレーズ（refusal 判定用）
+REFUSAL_HINTS = [
+    "特定の企業名", "特定の企業", "特定の会社", "特定のメーカー", "特定のブランド",
+    "具体的な社名", "具体的な企業名", "具体的な会社名", "具体的な企業",
+    "お答えでき", "お答えする立場", "存じ上げ", "把握してお", "把握してい",
+    "情報を持ち合わせ", "確実な情報を持ち合", "知識の範囲では", "学習データ",
+    "該当する企業", "という名称の", "確認できる情報", "申し訳",
+]
+
+# 評価軸キーワード辞書：AI が回答で持ち出す「選定・評価の観点」。
+# 未言及回答での頻度＝「当社が勝つべき土俵／強化すべきコンテンツの切り口」。
+# 形式： key -> (表示名, [キーワード…])
+CRITERIA = {
+    "quality":   ("品質・耐久性",   ["品質", "高品質", "耐久", "丈夫", "堅牢", "縫製"]),
+    "track":     ("実績・事例",     ["実績", "導入実績", "納入実績", "採用実績", "事例"]),
+    "price":     ("価格・コスト",   ["価格", "コスト", "費用", "安価", "リーズナブル", "低価格", "コストパフォーマンス", "コスパ"]),
+    "delivery":  ("納期・生産体制", ["納期", "短納期", "量産", "生産体制", "小ロット", "大量生産", "供給体制"]),
+    "design":    ("デザイン性",     ["デザイン性", "おしゃれ", "スタイリッシュ", "意匠", "デザイン"]),
+    "brand":     ("ブランド力",     ["ブランドイメージ", "ブランディング", "ブランド力", "ブランド"]),
+    "support":   ("対応・サポート", ["サポート", "アフター", "フォロー", "提案力", "相談", "対応力"]),
+    "custom":    ("別注・カスタム", ["オーダーメイド", "フルオーダー", "セミオーダー", "別注", "カスタム", "オリジナル", "オーダー"]),
+    "function":  ("機能性",         ["機能性", "ストレッチ", "制電", "帯電防止", "防炎", "透湿", "撥水", "動きやすさ", "快適性"]),
+    "sustain":   ("環境・サステナ", ["サステナ", "サステナブル", "環境配慮", "リサイクル", "SDGs", "再生素材", "エコ"]),
+    "scale":     ("規模・信頼性",   ["大手", "老舗", "全国展開", "上場", "国内最大", "最大手", "シェア"]),
+    "specialty": ("業種特化",       ["業界特化", "医療用", "白衣", "作業服", "サービス業", "専門", "特化"]),
+}
+
+
+def classify_answer(answer, n_company):
+    """回答を1タイプに分類する。n_company=本文中の企業名候補（太字）数。"""
+    a = (answer or "").strip()
+    if not a:
+        return "empty"
+    if a.startswith("ERROR"):
+        return "error"
+    if n_company >= 2:
+        return "list"
+    if any(h in a for h in REFUSAL_HINTS):
+        return "refusal"
+    return "general"
+
+
+def detect_criteria(answer):
+    """回答本文に登場する評価軸キーワードの key 一覧を返す。"""
+    if not answer:
+        return []
+    hits = []
+    for key, (_label, words) in CRITERIA.items():
+        if any(w in answer for w in words):
+            hits.append(key)
+    return hits
+
 
 # ────────────────────────────────────────────────────────────────
 # 読み込み
@@ -164,7 +228,10 @@ def load_rows(results_dir):
                     "set": qset,
                     "tier": tier,
                 }
-                row["competitors"] = extract_competitors(row["answer"]) if not hit else []
+                bold = extract_competitors(row["answer"])
+                row["competitors"] = bold if not hit else []
+                row["atype"] = classify_answer(row["answer"], len(bold))
+                row["criteria"] = detect_criteria(row["answer"])
                 rows.append(row)
                 n += 1
                 if not first_set:
@@ -318,6 +385,9 @@ def build_payload(rows, files_meta, ref, cfg):
             "runs": run_keys, "run_labels": run_labels,
             "timings": timing_keys, "timing_labels": timing_labels,
             "timing_runs": timing_runs,
+            "atype_labels": ATYPE_LABELS,
+            "criteria_labels": {k: v[0] for k, v in CRITERIA.items()},
+            "criteria_order": list(CRITERIA.keys()),
         },
         "rows": [
             {
@@ -331,6 +401,7 @@ def build_payload(rows, files_meta, ref, cfg):
                 "model": r["model"], "set": r["set"], "tier": r["tier"],
                 "hit": r["hit"], "question": r["question"], "answer": r["answer"],
                 "entities": r["entities"], "urls": r["urls"], "comp": r["competitors"],
+                "atype": r["atype"], "crit": r["criteria"],
             }
             for idx, r in enumerate(rows)
         ],
@@ -491,6 +562,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="card"><div id="comp-domain"></div></div>
   </section>
 
+  <!-- 回答分析（コンテキスト分析） -->
+  <section id="s-context">
+    <div class="summary" id="context-summary"></div>
+    <details class="howto"><summary>この画面の見方</summary>
+      <div class="body">回答全文（1回ごとの全履歴）を、社名だけでなく<b>「どう答えているか」</b>で分析します。
+        <b>①回答タイプ</b>＝各回答を「社名列挙型／一般論型／留保・拒否型／エラー・空」に自動分類（崖の下でAIが“名を出さず一般論に逃げる”構造を可視化）。
+        <b>②評価軸キーワード</b>＝未言及回答でAIが重視する観点（品質・実績・納期…）の頻度＝<b>強化すべき自社コンテンツの切り口</b>。
+        <b>③競合の文脈</b>＝競合名がどんな一文で描写されているか。<b>④自社ヒット文脈</b>＝当社が出た回答での前後文とトリガー。
+        <br>※ すべてオフラインのヒューリスティック（要目視確認）。分類・キーワードは generate.py の CRITERIA/ATYPE で調整できます。</div>
+    </details>
+    <div class="filters" id="filters-context"></div>
+    <div class="grid g2">
+      <div class="card"><h3>① 回答タイプの分布</h3><div id="ctx-type"></div></div>
+      <div class="card"><h3>② 評価軸キーワード（未言及回答でAIが重視する観点）</h3>
+        <div class="bar-wrap"><canvas id="chart-ctx" height="320"></canvas></div>
+        <div id="ctx-crit"></div></div>
+    </div>
+    <h2>③ 競合の文脈スニペット（未言及回答で競合がどう描かれているか）</h2>
+    <div class="card"><div id="ctx-comp"></div></div>
+    <h2>④ 自社ヒット時の文脈（当社が出た回答の前後文・共起する評価軸）</h2>
+    <div class="card"><div id="ctx-self"></div></div>
+  </section>
+
   <!-- P1: クロス集計 -->
   <section id="s-cross">
     <div class="summary" id="cross-summary"></div>
@@ -520,6 +614,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <h2>質問の反転（出た↔消えた）</h2>
     <div class="card"><div id="cmp-flip"></div></div>
+  </section>
+
+  <!-- 全回サマリー（過去回すべての比較・総合） -->
+  <section id="s-runs">
+    <div class="summary" id="runs-summary"></div>
+    <details class="howto"><summary>この画面の見方</summary>
+      <div class="body">過去<b>すべての回</b>を一望します。粒度は <b>run</b>（ファイル1つ＝1回）と <b>timing</b>（同一タイミングの r1/r2 をまとめ）から選べます。
+        <b>推移チャート</b>＝全回の出現率の時系列。<b>全回テーブル</b>＝回ごとの出現率・hits・エラー行数・競合数・トップ競合。
+        <b>総合集計</b>＝全回をプールしたドメイン別・特異度別の出現率と、回ごとのブレ（最小〜最大の幅）。
+        <br>※ 出現率は<b>有効行（エラー・空を除く）</b>を分母に計算します。APIキー未設定などで全行エラーの回は「—」と表示され、集計から自動で外れます。</div>
+    </details>
+    <div class="filters" id="filters-runs"></div>
+    <div class="card"><h3>出現率の推移（全回）</h3>
+      <div class="bar-wrap" style="max-height:340px"><canvas id="chart-runs" height="300"></canvas></div></div>
+    <h2>全回テーブル（クリックで その回のヒット回答へ）</h2>
+    <div class="card xtab"><div id="runs-table"></div></div>
+    <h2>総合集計（全回プール）＋ 回ごとのブレ</h2>
+    <div class="grid g2">
+      <div class="card"><h3>ドメイン別</h3><div id="runs-agg-domain"></div></div>
+      <div class="card"><h3>特異度ティア別（Set2）</h3><div id="runs-agg-tier"></div></div>
+    </div>
   </section>
 
   <!-- P2: 引用URL -->
@@ -571,8 +686,8 @@ $("#hdr-sub").innerHTML =
 
 // ── タブ
 const TABS = [
-  ["s-comp","競合共起 (P1)"],["s-cross","多軸クロス集計 (P1)"],
-  ["s-compare","過去回比較"],
+  ["s-comp","競合共起 (P1)"],["s-context","回答分析"],["s-cross","多軸クロス集計 (P1)"],
+  ["s-compare","過去回比較"],["s-runs","全回サマリー"],
   ["s-url","引用URL (P2)"],["s-self","自社突合 (P2)"],["s-p3","競合サイト (P3)"]
 ];
 const tabsEl = $("#tabs");
@@ -580,12 +695,14 @@ TABS.forEach(([id,label],i)=>{
   const b=document.createElement("div"); b.className="tab"+(i===0?" active":""); b.textContent=label;
   b.onclick=()=>{ $$(".tab").forEach(t=>t.classList.remove("active")); b.classList.add("active");
     $$("section").forEach(s=>s.classList.remove("active")); $("#"+id).classList.add("active");
-    if(id==="s-comp") renderComp(); if(id==="s-cross") renderCross(); if(id==="s-compare") renderCompare(); };
+    if(id==="s-comp") renderComp(); if(id==="s-context") renderContext();
+    if(id==="s-cross") renderCross(); if(id==="s-compare") renderCompare();
+    if(id==="s-runs") renderRuns(); };
   tabsEl.appendChild(b);
 });
 
 // ── フィルタ UI（各タブに独立生成）
-const FSTATE = {comp:{},cross:{},url:{}};
+const FSTATE = {comp:{},cross:{},url:{},context:{},runs:{gran:"run"}};
 function optionSet(){ return {
   timing:["タイミング",D.timings], run:["回(run)",D.runs],
   date:["実行日",D.dates], domain:["ドメイン",D.domains],
@@ -946,9 +1063,242 @@ function showFlip(qid, ia, ib){
     <div style="margin-top:14px">${block("B",B)}</div>`);
 }
 
+// ─────────────────────────────────────────── 回答分析（コンテキスト）
+const isValid = r => r.atype!=='error' && r.atype!=='empty';
+function stripBold(s){ return (s==null?"":String(s)).replace(/\*\*/g,""); }
+function sentencesWith(text, term){
+  if(!text||!term) return [];
+  const parts=String(text).split(/\n+|(?<=[。！？])/);
+  const out=[];
+  for(const p of parts){ const s=stripBold(p).trim(); if(s && s.indexOf(term)>=0) out.push(s); }
+  return out;
+}
+function sentencesWithAny(text, terms){
+  const parts=String(text||"").split(/\n+|(?<=[。！？])/);
+  const low=(terms||[]).map(t=>String(t).toLowerCase());
+  const out=[];
+  for(const p of parts){ const s=stripBold(p).trim(); if(!s) continue;
+    const sl=s.toLowerCase(); if(low.some(t=>t&&sl.indexOf(t)>=0)) out.push(s); }
+  return out;
+}
+let ctxChart=null;
+function renderContext(){
+  const st=FSTATE.context;
+  const rows=ROWS.filter(r=>passFilter(r,st));
+  const valid=rows.filter(isValid);
+  const miss=valid.filter(r=>!r.hit);
+  const hitRows=valid.filter(r=>r.hit);
+  const typeOrder=["list","general","refusal","empty","error"];
+  const tc={}; rows.forEach(r=>tc[r.atype]=(tc[r.atype]||0)+1);
+  const tot=rows.length||1; const pct=n=>Math.round(n/tot*1000)/10;
+  $("#context-summary").innerHTML = rows.length
+    ? `対象 <b>${rows.length}</b> 回答（有効 <b>${valid.length}</b>／エラー ${tc.error||0}／空 ${tc.empty||0}）。`
+      +`社名列挙型 <b>${pct(tc.list||0)}%</b>・一般論型 <b>${pct(tc.general||0)}%</b>・留保拒否型 <b>${pct(tc.refusal||0)}%</b>。`
+      +`<span class="muted"> 崖の下ほど“列挙型が減り一般論・留保が増える”＝AIの記憶に社名が無い＝GEO余地。</span>`
+    : `該当データがありません（フィルタを緩めてください）。`;
+  // ① タイプ表 ＋ ティア別構成
+  let typeHtml=`<table><thead><tr><th>回答タイプ</th><th>件数</th><th>割合</th><th></th></tr></thead><tbody>`
+    + typeOrder.filter(t=>tc[t]).map(t=>`<tr class="click" onclick='showTypeRows(${JSON.stringify(t)})'>
+        <td>${esc(D.atype_labels[t]||t)}</td><td class="rate">${tc[t]}</td><td class="rate">${pct(tc[t])}%</td>
+        <td class="muted">回答を見る ›</td></tr>`).join("") + `</tbody></table>`;
+  const s2tiers=D.tiers.filter(t=>rows.some(r=>r.set==="set2"&&r.tier===t));
+  if(s2tiers.length){
+    const shownTypes=typeOrder.filter(t=>tc[t]);
+    typeHtml+=`<div class="muted" style="margin:14px 0 6px">特異度ティア別（Set2）の回答タイプ構成</div>`
+      +`<table><thead><tr><th>ティア</th>`+shownTypes.map(t=>`<th>${esc(D.atype_labels[t])}</th>`).join("")+`</tr></thead><tbody>`
+      + s2tiers.map(ti=>{ const rr=rows.filter(r=>r.set==="set2"&&r.tier===ti);
+          return `<tr><td><b>${ti} ${esc(D.tier_labels[ti]||"")}</b></td>`
+            + shownTypes.map(t=>{const c=rr.filter(r=>r.atype===t).length;
+                return `<td class="rate">${c?c:'<span class="muted">–</span>'}</td>`;}).join("")+`</tr>`;
+        }).join("") + `</tbody></table>`;
+  }
+  $("#ctx-type").innerHTML=typeHtml;
+  // ② 評価軸キーワード（未言及の有効回答）
+  const order=D.criteria_order||Object.keys(D.criteria_labels||{});
+  const cc={}; order.forEach(k=>cc[k]=0);
+  miss.forEach(r=>(r.crit||[]).forEach(k=>{ if(k in cc) cc[k]++; }));
+  const critList=order.map(k=>({k,label:D.criteria_labels[k]||k,c:cc[k]}))
+    .filter(o=>o.c>0).sort((a,b)=>b.c-a.c);
+  const missN=miss.length||1;
+  const wrap=$("#chart-ctx").parentElement;
+  if(ctxChart){ ctxChart.destroy(); ctxChart=null; }
+  if(critList.length){
+    wrap.style.display="";
+    ctxChart=new Chart($("#chart-ctx"),{type:"bar",
+      data:{labels:critList.map(o=>o.label),
+        datasets:[{label:"該当回答数",data:critList.map(o=>o.c),
+          backgroundColor:"rgba(52,211,153,.55)",borderColor:"#34d399",borderWidth:1}]},
+      options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{x:{ticks:{color:"#94a3b8"},grid:{color:"#334155"}},
+                y:{ticks:{color:"#e2e8f0"},grid:{display:false}}}}});
+    $("#ctx-crit").innerHTML=`<table><thead><tr><th>評価軸</th><th>該当回答数</th><th>該当率</th><th></th></tr></thead><tbody>`
+      + critList.map(o=>`<tr class="click" onclick='showCritRows(${JSON.stringify(o.k)})'>
+          <td>${esc(o.label)}</td><td class="rate">${o.c}</td><td class="rate">${Math.round(o.c/missN*1000)/10}%</td>
+          <td class="muted">回答を見る ›</td></tr>`).join("")
+      + `</tbody></table><div class="muted" style="margin-top:6px">分母＝未言及の有効回答 ${miss.length} 件。頻出＝AIがその観点で他社を選定＝当社が同じ土俵で示すべき切り口。</div>`;
+  } else {
+    wrap.style.display="none";
+    $("#ctx-crit").innerHTML=`<div class="muted">該当なし</div>`;
+  }
+  // ③ 競合の文脈スニペット
+  const cagg={};
+  miss.forEach(r=>(r.comp||[]).forEach(n=>{
+    const o=cagg[n]||(cagg[n]={name:n,count:0,rows:[]}); o.count++; o.rows.push(r.i); }));
+  const topc=Object.values(cagg).sort((a,b)=>b.count-a.count).slice(0,8);
+  $("#ctx-comp").innerHTML = topc.length
+    ? topc.map(o=>{ const snip=[];
+        for(const idx of o.rows){ if(snip.length>=2) break;
+          const ss=sentencesWith(ROWS[idx].answer,o.name); if(ss.length) snip.push({s:ss[0],i:idx}); }
+        return `<div style="margin:6px 0 14px"><b class="tagM">${esc(o.name)}</b>
+          <span class="muted">登場 ${o.count} 回答</span>
+          ${snip.map(x=>`<div class="answer" style="max-height:none;margin:6px 0;cursor:pointer" onclick='showAnswer(${x.i})'>… ${esc(x.s)} …</div>`).join("")
+            || `<div class="muted">前後文を抽出できませんでした（クリックで全文）</div>`}</div>`;
+      }).join("")
+    : `<div class="muted">競合候補なし（未言及の有効回答がありません）。</div>`;
+  // ④ 自社ヒット文脈
+  const owns=(DATA.meta.own_names||[]);
+  $("#ctx-self").innerHTML = hitRows.length
+    ? hitRows.map(r=>{ const ss=sentencesWithAny(r.answer,owns);
+        const crit=(r.crit||[]).map(k=>`<span class="pill">${esc(D.criteria_labels[k]||k)}</span>`).join("");
+        return `<div class="card" style="margin:8px 0;cursor:pointer" onclick='showAnswer(${r.i})'>
+          <span class="tagH">●言及</span> <b>${esc(r.qid)}</b>
+          <span class="pill">${esc(r.domain)}${r.tier?(" / "+r.tier):""}</span>
+          <span class="pill">${esc(cmpLabel('run',r.run))}</span><br>
+          <span class="muted">${esc(r.question)}</span>
+          ${ss.length?`<div class="answer" style="max-height:none;margin:6px 0">… ${esc(ss[0])} …</div>`:""}
+          ${crit?`<div style="margin-top:4px">共起する評価軸: ${crit}</div>`:""}</div>`;
+      }).join("")
+    : `<div class="muted">当社が言及された有効回答は このフィルタ内にありません。</div>`;
+}
+function showTypeRows(t){
+  const st=FSTATE.context;
+  const rows=ROWS.filter(r=>passFilter(r,st)&&r.atype===t);
+  openModal(`<h3>回答タイプ「${esc(D.atype_labels[t]||t)}」（${rows.length}件）</h3>
+    <div class="meta">クリックで回答全文。</div>`
+    + rows.slice(0,300).map(r=>`<div class="card" style="margin:8px 0;cursor:pointer" onclick='showAnswer(${r.i})'>
+        <span class="${r.hit?'tagH':'tagM'}">${r.hit?'●言及':'×未言及'}</span>
+        <b>${esc(r.qid)}</b> <span class="pill">${esc(r.domain)}${r.tier?(" / "+r.tier):""}</span>
+        <span class="pill">${esc(r.date)}</span><br><span class="muted">${esc(r.question)}</span></div>`).join("")
+    + (rows.length>300?`<div class="muted">（先頭300件を表示）</div>`:""));
+}
+function showCritRows(k){
+  const st=FSTATE.context;
+  const rows=ROWS.filter(r=>passFilter(r,st)&&isValid(r)&&!r.hit&&(r.crit||[]).includes(k));
+  openModal(`<h3>評価軸「${esc(D.criteria_labels[k]||k)}」を含む未言及回答（${rows.length}件）</h3>
+    <div class="meta">AIがこの観点で他社を語っている回答です。クリックで全文。</div>`
+    + rows.slice(0,300).map(r=>`<div class="card" style="margin:8px 0;cursor:pointer" onclick='showAnswer(${r.i})'>
+        <b>${esc(r.qid)}</b> <span class="pill">${esc(r.domain)}${r.tier?(" / "+r.tier):""}</span>
+        <span class="pill">${esc(r.date)}</span>
+        ${(r.comp&&r.comp.length)?`<br>競合候補: `+r.comp.slice(0,6).map(n=>`<span class="pill bad">${esc(n)}</span>`).join(""):""}
+        <br><span class="muted">${esc(r.question)}</span></div>`).join("")
+    + (rows.length>300?`<div class="muted">（先頭300件を表示）</div>`:""));
+}
+
+// ─────────────────────────────────────────── 全回サマリー
+let runsChart=null;
+function passRunsFilter(r,st){
+  if(st.domain && r.domain!==st.domain) return false;
+  if(st.tier && r.tier!==st.tier) return false;
+  if(st.set && r.set!==st.set) return false;
+  if(st.model && r.model!==st.model) return false;
+  return true;
+}
+function runRate(rows){ const v=rows.filter(isValid); if(!v.length) return null;
+  return Math.round(v.filter(r=>r.hit).length/v.length*1000)/10; }
+function renderRuns(){
+  const st=FSTATE.runs; const gran=st.gran||"run";
+  const units=cmpUnits(gran);
+  const base=ROWS.filter(r=>passRunsFilter(r,st));
+  const keyOf = r => gran==="timing"?r.timing:r.run;
+  const per=units.map(u=>{
+    const rr=base.filter(r=>keyOf(r)===u);
+    const v=rr.filter(isValid);
+    const comps={}; rr.forEach(r=>{ if(!r.hit)(r.comp||[]).forEach(n=>comps[n]=(comps[n]||0)+1); });
+    const topc=Object.entries(comps).sort((a,b)=>b[1]-a[1])[0];
+    return {u,label:cmpLabel(gran,u),n:rr.length,valid:v.length,
+      err:rr.filter(r=>r.atype==="error").length, emp:rr.filter(r=>r.atype==="empty").length,
+      hits:v.filter(r=>r.hit).length, rate:runRate(rr), ncomp:Object.keys(comps).length, topc};
+  });
+  const allValid=base.filter(isValid); const pooled=runRate(base);
+  const active=per.filter(p=>p.rate!=null);
+  $("#runs-summary").innerHTML =
+    `全 <b>${units.length}</b> ${gran}（うち有効な回 ${active.length}）。全回プールの出現率 <b>${pooled==null?"–":pooled+"%"}</b>`
+    +`（有効行 ${allValid.length} 中 ヒット ${allValid.filter(r=>r.hit).length}）。`
+    +`<span class="muted"> エラーのみの回は集計から自動除外。</span>`;
+  if(runsChart){ runsChart.destroy(); runsChart=null; }
+  runsChart=new Chart($("#chart-runs"),{type:"line",
+    data:{labels:per.map(p=>p.label),
+      datasets:[{label:"出現率%",data:per.map(p=>p.rate),spanGaps:true,tension:.25,
+        borderColor:"#38bdf8",backgroundColor:"rgba(56,189,248,.2)",fill:true,
+        pointRadius:4,pointBackgroundColor:"#38bdf8"}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:"#94a3b8"},grid:{color:"#334155"}},
+              y:{beginAtZero:true,ticks:{color:"#94a3b8"},grid:{color:"#334155"}}}}});
+  $("#runs-table").innerHTML=
+    `<table><thead><tr><th>回</th><th>有効行</th><th>hits</th><th>出現率</th><th>エラー</th><th>空</th><th>ユニーク競合</th><th>トップ競合</th></tr></thead><tbody>`
+    + per.map(p=>`<tr class="click" onclick='showRunRows(${JSON.stringify(gran)},${JSON.stringify(p.u)})'>
+        <td><b>${esc(p.label)}</b></td><td class="rate">${p.valid}</td><td class="rate">${p.hits}</td>
+        <td class="rate">${p.rate==null?'<span class="muted">–</span>':p.rate+"%"}</td>
+        <td class="rate">${p.err||0}</td><td class="rate">${p.emp||0}</td><td class="rate">${p.ncomp}</td>
+        <td>${p.topc?`<span class="pill bad">${esc(p.topc[0])} ${p.topc[1]}</span>`:'<span class="muted">–</span>'}</td>
+      </tr>`).join("") + `</tbody></table>`;
+  const aggTable=(ax,vals)=>{
+    const rowsH=vals.filter(v=>base.some(r=>r[ax]===v)).map(v=>{
+      const pooledV=runRate(base.filter(r=>r[ax]===v));
+      const rates=per.map(p=>runRate(base.filter(r=>keyOf(r)===p.u && r[ax]===v))).filter(x=>x!=null);
+      let spread='<span class="muted">–</span>';
+      if(rates.length){ const mn=Math.min(...rates),mx=Math.max(...rates);
+        spread=`${mn}%〜${mx}%<span class="muted"> (幅 ${Math.round((mx-mn)*10)/10}pt)</span>`; }
+      return `<tr><td>${esc(axisLabel(ax,v))}</td><td class="rate">${pooledV==null?"–":pooledV+"%"}</td><td>${spread}</td></tr>`;
+    }).join("");
+    return `<table><thead><tr><th>${AXES[ax]}</th><th>全回プール</th><th>回ごとのブレ(最小〜最大)</th></tr></thead>`
+      +`<tbody>${rowsH||`<tr><td colspan="3" class="muted">該当なし</td></tr>`}</tbody></table>`;
+  };
+  $("#runs-agg-domain").innerHTML=aggTable("domain",D.domains);
+  $("#runs-agg-tier").innerHTML = D.tiers.length? aggTable("tier",D.tiers) : `<div class="muted">Set2 特異度データがありません。</div>`;
+}
+function showRunRows(gran,u){
+  const st=FSTATE.runs;
+  const rr=ROWS.filter(r=>passRunsFilter(r,st) && (gran==="timing"?r.timing:r.run)===u);
+  const hits=rr.filter(r=>r.hit);
+  openModal(`<h3>${esc(cmpLabel(gran,u))} のヒット回答（${hits.length}件）</h3>
+    <div class="meta">この回で当社が言及された回答。有効行 ${rr.filter(isValid).length}／全 ${rr.length}行。クリックで全文。</div>`
+    + (hits.length? hits.map(r=>`<div class="card" style="margin:8px 0;cursor:pointer" onclick='showAnswer(${r.i})'>
+        <span class="tagH">●言及</span> <b>${esc(r.qid)}</b>
+        <span class="pill">${esc(r.domain)}${r.tier?(" / "+r.tier):""}</span><br>
+        <span class="muted">${esc(r.question)}</span></div>`).join("")
+      : `<div class="muted">この回に当社ヒットはありません。</div>`));
+}
+function buildRunsFilters(){
+  const mount=$("#filters-runs"); mount.innerHTML="";
+  const mk=(label,build,onchange)=>{ const f=document.createElement("div"); f.className="f";
+    const lab=document.createElement("label"); lab.textContent=label;
+    const sel=document.createElement("select"); build(sel);
+    sel.onchange=()=>{ onchange(sel.value); renderRuns(); };
+    f.appendChild(lab); f.appendChild(sel); mount.appendChild(f); };
+  mk("粒度",sel=>{sel.innerHTML=`<option value="run">run（ファイル1つ＝1回）</option><option value="timing">timing（r1/r2をまとめ）</option>`;
+    sel.value=FSTATE.runs.gran||"run";}, v=>FSTATE.runs.gran=v);
+  const addF=(label,k,vals,lab)=>{ if(!vals||!vals.length) return;
+    mk(label,sel=>{sel.innerHTML=`<option value="">すべて</option>`+vals.map(v=>`<option value="${esc(v)}">${esc(lab?lab(v):v)}</option>`).join("");
+      sel.value=FSTATE.runs[k]||"";}, v=>FSTATE.runs[k]=v); };
+  addF("ドメイン","domain",D.domains,v=>`${v}｜${D.domain_labels[v]||""}`);
+  addF("特異度","tier",D.tiers,v=>`${v} ${D.tier_labels[v]||""}`);
+  addF("質問セット","set",D.sets,null);
+  addF("モデル","model",D.models,null);
+  const rf=document.createElement("div"); rf.className="f";
+  rf.appendChild(document.createElement("label"));
+  const rb=document.createElement("button"); rb.className="reset"; rb.textContent="リセット";
+  rb.onclick=()=>{ const g=FSTATE.runs.gran||"run"; FSTATE.runs={gran:g}; buildRunsFilters(); renderRuns(); };
+  rf.appendChild(rb); mount.appendChild(rf);
+}
+
 // ── init
 buildFilters("filters-comp","comp",renderComp);
+buildFilters("filters-context","context",renderContext);
 buildFilters("filters-url","url",renderUrl);
+buildRunsFilters();
 // 過去回比較：粒度・A・B セレクタ
 FSTATE.compare = {gran:"run"};
 (function(){
@@ -981,7 +1331,7 @@ FSTATE.compare = {gran:"run"};
   const extra=[mk("_rax","domain"),mk("_cax","tier")];
   buildFilters("filters-cross","cross",renderCross,extra);
 })();
-renderComp(); renderCross(); renderUrl(); renderSelf(); renderCompare();
+renderComp(); renderContext(); renderCross(); renderUrl(); renderSelf(); renderCompare(); renderRuns();
 </script>
 </body>
 </html>
