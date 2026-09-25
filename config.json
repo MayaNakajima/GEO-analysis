@@ -1,5 +1,8 @@
 {
   "results_dir": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\monitoring\\data\\results",
   "reference_md": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\Set2_実績スクレイピング_reference.md",
-  "output_html": "C:\\Users\\612316\\Documents\\GitHub\\GEO-analysis\\analysis.html"
+  "output_html": "C:\\Users\\612316\\Documents\\GitHub\\GEO-analysis\\analysis.html",
+  "share_dirs": [
+    "C:\\Users\\612316\\Box\\事業推進Div□\\DX推進課\\生成AI\\GEO-analysis"
+  ]
 }

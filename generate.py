@@ -22,6 +22,8 @@ GEO 定点観測 分析アプリ ── 生成スクリプト
 使い方：
     python generate.py                     # config.json の設定で生成
     python generate.py --results-dir <dir> --reference <md> --out <html>
+    python generate.py --open              # 生成後に共有フォルダへコピーしブラウザで開く
+    （ふだんは「更新して開く.bat」をダブルクリックするだけで同じことができる）
 """
 
 import argparse
@@ -31,6 +33,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sys
 from datetime import datetime
 
@@ -154,6 +157,7 @@ def load_config(path):
         "results_dir": "",
         "reference_md": "",
         "output_html": os.path.join(HERE, "analysis.html"),
+        "share_dirs": [],   # 生成後に analysis.html をコピーする共有フォルダ（BOX 等）
     }
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
@@ -429,6 +433,8 @@ def main():
     ap.add_argument("--results-dir", default=None)
     ap.add_argument("--reference", default=None)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--open", action="store_true", help="生成後に analysis.html をブラウザで開く")
+    ap.add_argument("--no-share", action="store_true", help="share_dirs へのコピーを行わない")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -457,6 +463,42 @@ def main():
     print(f"     rows={len(rows)}  hits={hits}  files={len(files_meta)}")
     print(f"     competitors extracted (miss rows): "
           f"{sum(len(r['competitors']) for r in rows)} mentions")
+
+    if not args.no_share:
+        copy_to_share_dirs(out, cfg.get("share_dirs") or [])
+    if args.open:
+        open_in_browser(out)
+
+
+def copy_to_share_dirs(out, share_dirs):
+    """生成した HTML を共有フォルダ（BOX 等）へ同名でコピーする。失敗しても生成自体は成功扱い。"""
+    if isinstance(share_dirs, str):
+        share_dirs = [share_dirs]
+    src = os.path.abspath(out)
+    for d in share_dirs:
+        dst = os.path.join(d, os.path.basename(out))
+        if os.path.abspath(dst) == src:
+            continue
+        if not os.path.isdir(d):
+            print(f"[WARN] 共有フォルダが見つかりません（コピーをスキップ）: {d}")
+            continue
+        try:
+            shutil.copy2(src, dst)
+            print(f"[OK] 共有フォルダへコピー: {dst}")
+        except OSError as e:
+            print(f"[WARN] 共有フォルダへのコピーに失敗: {dst} ({e})")
+
+
+def open_in_browser(path):
+    path = os.path.abspath(path)
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(path)          # Windows：既定のブラウザで開く
+        else:
+            import webbrowser
+            webbrowser.open("file://" + path)
+    except OSError as e:
+        print(f"[WARN] ブラウザで開けませんでした: {path} ({e})")
 
 
 # ────────────────────────────────────────────────────────────────
