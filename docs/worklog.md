@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-09-25  branch: feature/one-click-update
+- 目的：最新データを反映して開く操作を簡単にする。関係者が開く BOX フォルダも常に最新にする。
+- 作業内容：
+  - **`更新して開く.bat` を新規追加**：ダブルクリックで 再生成 → `share_dirs` へコピー → 既定ブラウザで表示。Python は Anaconda（`C:\work\anaconda_install`）を自動検出し、無ければ `py`/`python`。エラー時はウィンドウを残す（pause）。bat 本文は文字化け回避のため ASCII のみ。
+  - `generate.py`：`--open`（生成後にブラウザ表示）・`--no-share`（コピー抑止）を追加。config の `share_dirs`（リスト）へ `analysis.html` をコピー（フォルダ無し・コピー失敗は WARN でスキップし、生成は成功扱い）。
+  - `config.json`：`share_dirs` に BOX `事業推進Div□\DX推進課\生成AI\GEO-analysis` を設定。
+  - docs：README・実行手順書にワンクリック手順／`share_dirs` を追記。パス一覧の旧 `Downloads\06_GEO` を現行パスに更新。
+  - BOX フォルダのアプリ一式（generate.py・config.json・README・docs・bat）もリポジトリの最新版に同期。
+  - **修正（確認NG→継続）**：`.html` の関連付けがエディタ（VS Code）の環境では `os.startfile` だとエディタで開いてしまうため、`--open` を「既定のブラウザ」で開く方式に変更。レジストリの `UrlAssociations\https|http\UserChoice` の ProgId から起動コマンドを取得し `file:///` URL で起動（ブラウザ種別は固定しない）。取得できない場合は Edge → `webbrowser` の順にフォールバック。
+- 確認：bat を実行し rows=1794 hits=49 files=14 で生成。BOX へのコピー（サイズ・更新時刻一致）を確認。.html=VSCode・既定ブラウザ=Chrome の環境で Chrome で開くことを確認。HTML テンプレートは変更なし。
+- コミット：8d96303（feat）・1ce5847（fix：既定ブラウザで開く）＋本worklogのハッシュ追記コミット／マージ：main への --no-ff マージコミット
+
+---
+
 ## 2026-08-05  branch: feature/all-runs-summary-and-context
 - 目的：結果分析の拡張。(1) 過去回すべての比較・総合を可能にする。(2) 回答本文（1回ごとの全履歴）のコンテキスト分析を追加する。
 - 作業内容：

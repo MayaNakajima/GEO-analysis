@@ -24,16 +24,20 @@
 
 ## 使い方
 
-Python 標準ライブラリのみで動作します（追加インストール不要）。実行は **Anaconda Prompt** から。
+**いちばん簡単：`更新して開く.bat` をダブルクリック。** 最新 CSV で再生成 → 関係者用 BOX フォルダへコピー → ブラウザで開く、までを自動で行います。
+関係者は BOX の `GEO-analysis\analysis.html` を開くだけです。
+
+コマンドで実行する場合：Python 標準ライブラリのみで動作します（追加インストール不要）。実行は **Anaconda Prompt** から。
 
 ```bat
 REM 1) config.json のパスを自分の環境に合わせて確認
 REM 2) フォルダへ移動して生成
 cd /d C:\Users\612316\Documents\GitHub\GEO-analysis
 python generate.py
+python generate.py --open        REM 生成後にブラウザで開く（--no-share で BOX へのコピーを抑止）
 
 REM パスを直接指定する場合（1行）
-python generate.py --results-dir "C:\Users\612316\Downloads\06_GEO\monitoring\data\results" --reference "C:\Users\612316\Downloads\06_GEO\Set2_実績スクレイピング_reference.md" --out "C:\Users\612316\Documents\GitHub\GEO-analysis\analysis.html"
+python generate.py --results-dir "C:\Users\612316\Documents\GitHub\GEO\monitoring\data\results" --reference "C:\Users\612316\Documents\GitHub\GEO\Set2_実績スクレイピング_reference.md" --out "C:\Users\612316\Documents\GitHub\GEO-analysis\analysis.html"
 ```
 
 > 実行手順の詳細（Anaconda Prompt の起動・パス一覧・トラブルシューティング）は `docs/実行手順書_v1.md` を参照。
@@ -45,11 +49,14 @@ CSV を再測定・追加したら `python generate.py` を再実行すれば最
 
 ```json
 {
-  "results_dir": "C:\\Users\\612316\\Downloads\\06_GEO\\monitoring\\data\\results",
-  "reference_md": "C:\\Users\\612316\\Downloads\\06_GEO\\Set2_実績スクレイピング_reference.md",
-  "output_html": "C:\\Users\\612316\\Documents\\GitHub\\GEO-analysis\\analysis.html"
+  "results_dir": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\monitoring\\data\\results",
+  "reference_md": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\Set2_実績スクレイピング_reference.md",
+  "output_html": "C:\\Users\\612316\\Documents\\GitHub\\GEO-analysis\\analysis.html",
+  "share_dirs": ["C:\\Users\\612316\\Box\\事業推進Div□\\DX推進課\\生成AI\\GEO-analysis"]
 }
 ```
+
+`share_dirs`（省略可）：生成後に `analysis.html` をコピーする共有フォルダ（関係者が開く BOX 等）。
 
 > 定点観測アプリ（monitoring）は別リポジトリ・別開発環境にあり、今後修正の可能性があります。
 > 本アプリは **同じ CSV を読むだけの疎結合** なので、monitoring 側の改修と独立に運用できます。
@@ -121,7 +128,8 @@ AI 回答に実際に登場した競合サイトのみを対象に取得し、�
 ```
 GEO-analysis/
 ├─ generate.py     … データ処理＋HTML生成（stdlibのみ）
-├─ config.json     … データパス設定
+├─ config.json     … データパス・共有フォルダ設定
+├─ 更新して開く.bat … ダブルクリックで 再生成→BOXへコピー→ブラウザ表示
 ├─ analysis.html   … 生成物（.gitignore 対象・再生成可能）
 ├─ README.md
 └─ .gitignore
