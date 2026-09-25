@@ -16,7 +16,7 @@
   - BOX フォルダのアプリ一式（generate.py・config.json・README・docs・bat）もリポジトリの最新版に同期。
   - **修正（確認NG→継続）**：`.html` の関連付けがエディタ（VS Code）の環境では `os.startfile` だとエディタで開いてしまうため、`--open` を「既定のブラウザ」で開く方式に変更。レジストリの `UrlAssociations\https|http\UserChoice` の ProgId から起動コマンドを取得し `file:///` URL で起動（ブラウザ種別は固定しない）。取得できない場合は Edge → `webbrowser` の順にフォールバック。
 - 確認：bat を実行し rows=1794 hits=49 files=14 で生成。BOX へのコピー（サイズ・更新時刻一致）を確認。.html=VSCode・既定ブラウザ=Chrome の環境で Chrome で開くことを確認。HTML テンプレートは変更なし。
-- コミット：（本ブランチ）／マージ：main への --no-ff マージコミット
+- コミット：8d96303（feat）・1ce5847（fix：既定ブラウザで開く）＋本worklogのハッシュ追記コミット／マージ：main への --no-ff マージコミット
 
 ---
 
