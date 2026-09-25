@@ -14,7 +14,8 @@
   - `config.json`：`share_dirs` に BOX `事業推進Div□\DX推進課\生成AI\GEO-analysis` を設定。
   - docs：README・実行手順書にワンクリック手順／`share_dirs` を追記。パス一覧の旧 `Downloads\06_GEO` を現行パスに更新。
   - BOX フォルダのアプリ一式（generate.py・config.json・README・docs・bat）もリポジトリの最新版に同期。
-- 確認：bat を実行し rows=1794 hits=49 files=14 で生成。BOX へのコピー（サイズ・更新時刻一致）とブラウザ起動を確認。HTML テンプレートは変更なし。
+  - **修正（確認NG→継続）**：`.html` の関連付けがエディタ（VS Code）の環境では `os.startfile` だとエディタで開いてしまうため、`--open` を「既定のブラウザ」で開く方式に変更。レジストリの `UrlAssociations\https|http\UserChoice` の ProgId から起動コマンドを取得し `file:///` URL で起動（ブラウザ種別は固定しない）。取得できない場合は Edge → `webbrowser` の順にフォールバック。
+- 確認：bat を実行し rows=1794 hits=49 files=14 で生成。BOX へのコピー（サイズ・更新時刻一致）を確認。.html=VSCode・既定ブラウザ=Chrome の環境で Chrome で開くことを確認。HTML テンプレートは変更なし。
 - コミット：（本ブランチ）／マージ：main への --no-ff マージコミット
 
 ---

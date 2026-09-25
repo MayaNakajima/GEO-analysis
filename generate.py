@@ -34,8 +34,11 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import webbrowser
 from datetime import datetime
+from pathlib import Path
 
 # ────────────────────────────────────────────────────────────────
 # 設定
@@ -489,16 +492,52 @@ def copy_to_share_dirs(out, share_dirs):
             print(f"[WARN] 共有フォルダへのコピーに失敗: {dst} ({e})")
 
 
-def open_in_browser(path):
-    path = os.path.abspath(path)
+def _default_browser_command():
+    """Windows の「既定のブラウザ」（http の関連付け）の起動コマンドを返す。取れなければ None。
+    .html の関連付けはエディタ等になっている場合があるため、そちらは使わない。"""
     try:
-        if hasattr(os, "startfile"):
-            os.startfile(path)          # Windows：既定のブラウザで開く
-        else:
-            import webbrowser
-            webbrowser.open("file://" + path)
-    except OSError as e:
-        print(f"[WARN] ブラウザで開けませんでした: {path} ({e})")
+        import winreg
+    except ImportError:
+        return None
+    for scheme in ("https", "http"):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\Shell\Associations"
+                                rf"\UrlAssociations\{scheme}\UserChoice") as k:
+                progid = winreg.QueryValueEx(k, "ProgId")[0]
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                                rf"{progid}\shell\open\command") as k:
+                cmd = winreg.QueryValueEx(k, "")[0]
+            if cmd:
+                return cmd
+        except OSError:
+            continue
+    return None
+
+
+def open_in_browser(path):
+    """既定のブラウザ（Chrome／Edge／Firefox 等、ユーザーの設定どおり）で HTML を開く。"""
+    url = Path(os.path.abspath(path)).as_uri()   # 日本語・空白は %XX に変換される
+    cmd = _default_browser_command()
+    if cmd:
+        cmd = cmd.replace("%1", url) if "%1" in cmd else f'{cmd} "{url}"'
+        cmd = re.sub(r'\s%[*\dL]', "", cmd)      # 残りのプレースホルダ（%* 等）は除去
+        try:
+            subprocess.Popen(cmd)
+            print(f"[OK] ブラウザで開きました: {url}")
+            return
+        except OSError as e:
+            print(f"[WARN] 既定のブラウザを起動できませんでした ({e})。Edge で開きます。")
+    if os.name == "nt":
+        try:
+            # 既定ブラウザが取れない場合は Windows 標準の Edge で開く
+            subprocess.Popen(f'cmd /c start "" msedge "{url}"')
+            print(f"[OK] Edge で開きました: {url}")
+            return
+        except OSError:
+            pass
+    if not webbrowser.open(url):
+        print(f"[WARN] ブラウザで開けませんでした。手動で開いてください: {path}")
 
 
 # ────────────────────────────────────────────────────────────────
