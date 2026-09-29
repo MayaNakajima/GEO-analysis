@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-09-29  branch: feature/gsc-reference
+- 目的：Claude の出現と同じ設問で、Google 自然検索（GSC）の結果を参考値として並べて見られるようにする（設計：GEO `Google参考値観測_設計_v1.md` のフェーズ1＝GSC 取り込み＋ダッシュボード表示）。
+- 作業内容：
+  - `gsc_reader.py`（新規）：GSC 手動ダウンロードの xlsx を標準ライブラリで読む。ファイル名先頭でサイト（CO／UN／SCH／MED／MED-EC／IS）、フィルタシートで期間（月次／期間集計）を判定、同一サイト・期間は新しいファイルを採用、設問マスタの GSC参照クエリだけを埋め込む。
+  - `generate.py`：`gsc_dir`・`google_keywords_csv`・`gsc_sites`・`action_notes` を config に追加。「Google参考値」タブ（4象限・設問一覧・設問詳細の推移・AI Overview・取り込み状況）とホームの1行を追加。自動更新の変更判定に GSC ファイル・設問マスタを追加。読み込み失敗時も生成は止めない。
+  - `config.json`：`gsc_dir`（DSP ダッシュボード用 Box フォルダを共用）、`google_keywords_csv`（GEO の monitoring/config/google_keywords.csv）、`action_notes` を追加。
+  - README・仕様書・実行手順書（D-2 毎月の GSC ダウンロード、トラブル表）を更新。
+- 確認：現行の12ファイル（16か月の期間集計）で再生成 → JS エラーなし。4象限の件数（GEO優先19／両方強い7／両方弱い26／AIでは出現6／判定保留80）を Python で独立に再計算して一致。日付だけ書き換えた月次のテストファイル（2026-08・09）で、月次判定・「最新」の選び方・Claude 側の月合わせ・重複ファイルの採用・不正なファイル名の除外・設問詳細の推移グラフ・action_notes の表示を確認。
+- コミット：（本コミット）／マージ：（確認後に main へ --no-ff）
+
+---
+
 ## 2026-09-29  branch: feature/auto-update-task
 - 目的：monitoring の計測後に analysis.html を手で作り直す手間をなくし、BOX の共有版を自動で最新に保つ。
 - 作業内容：

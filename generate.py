@@ -42,6 +42,8 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+import gsc_reader
+
 # ────────────────────────────────────────────────────────────────
 # 設定
 # ────────────────────────────────────────────────────────────────
@@ -168,11 +170,42 @@ def load_config(path):
         "domain_owner": {},        # domain_label -> 担当事業（UN/SCH/MED/IS/コーポレート/横断）
         # 稼働モデル名にこれらが含まれれば Web 検索（グラウンディング）ありとみなす
         "grounding_model_keywords": ["perplexity", "sonar", "grounding", "search"],
+        # Google参考値タブ：GSC の手動ダウンロード（xlsx）の置き場所と、設問キーワードのマスタ
+        "gsc_dir": "",
+        "google_keywords_csv": "",   # 空なら results_dir の2つ上（monitoring）/config/google_keywords.csv
+        "gsc_sites": {},             # サイト略称 -> {label, domain}（空なら gsc_reader.GSC_SITES）
+        "action_notes": [],          # 施策の記録 [{date, qids:[設問ID...], note}]（推移に表示）
     }
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             cfg.update(json.load(f))
     return cfg
+
+
+def google_keywords_path(cfg):
+    p = cfg.get("google_keywords_csv") or ""
+    if not p and cfg.get("results_dir"):
+        p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(cfg["results_dir"]))),
+                         "config", "google_keywords.csv")
+    return p
+
+
+def load_google(cfg):
+    """Google参考値タブのデータ。失敗しても生成は止めない（タブに「データなし」を出す）。"""
+    try:
+        g = gsc_reader.build(cfg.get("gsc_dir", ""), google_keywords_path(cfg), cfg.get("gsc_sites") or None)
+    except Exception as e:
+        g = {"available": False, "periods": [], "keywords": {}, "ref": {}, "daily": {}, "ai_pages": {},
+             "log": [], "sites": gsc_reader.GSC_SITES, "dir": cfg.get("gsc_dir", ""),
+             "warnings": [f"GSC の読み込みに失敗しました（{e}）"]}
+    notes = []
+    for n in cfg.get("action_notes") or []:
+        if isinstance(n, dict) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(n.get("date", ""))):
+            q = n.get("qids") or []
+            notes.append({"date": n["date"], "qids": [str(x) for x in (q if isinstance(q, list) else [q])],
+                          "note": str(n.get("note", ""))})
+    g["action_notes"] = sorted(notes, key=lambda n: n["date"])
+    return g
 
 
 _fn_re = re.compile(r'results_(\d{8})_(\d{6})_r(\d+)\.csv', re.I)
@@ -544,7 +577,9 @@ def _input_files(cfg, config_path):
     if rd:
         files += glob.glob(os.path.join(rd, "index.json")) + glob.glob(os.path.join(rd, "insights_*.json"))
     files += [p for p in (cfg.get("reference_md", ""), config_path, os.path.abspath(__file__)) if p]
-    return [p for p in files if os.path.isfile(p)]
+    files += gsc_reader.input_files(cfg.get("gsc_dir", ""))
+    files += [google_keywords_path(cfg), os.path.abspath(gsc_reader.__file__)]
+    return [p for p in files if p and os.path.isfile(p)]
 
 
 def _share_is_stale(out, share_dirs):
@@ -595,6 +630,8 @@ def run(args):
     ref = load_reference(cfg.get("reference_md", ""))
     reports = load_reports(cfg.get("reports_dir", ""))
     payload = build_payload(rows, files_meta, ref, cfg, reports)
+    google = load_google(cfg)
+    payload["google"] = google
     html_text = render_html(payload)
 
     out = cfg["output_html"]
@@ -621,6 +658,11 @@ def run(args):
               f"index: {len(reports['index'] or [])} timings")
     else:
         print("     insights: なし（ホームの該当ブロックは「データなし」表示）")
+    n_ok = sum(1 for l in google.get("log", []) if l["status"] == "取り込み")
+    print(f"     google: GSC {n_ok} ファイル取り込み／期間 {len(google.get('periods', []))}／"
+          f"設問キーワード {len(google.get('keywords', {}))} 問")
+    for w in google.get("warnings", []):
+        print(f"[WARN] {w}")
 
     if not args.no_share:
         copy_to_share_dirs(out, cfg.get("share_dirs") or [])
@@ -799,6 +841,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .pill.pri{color:#fff;background:var(--bad);border-color:var(--bad);}
   .pill.pri.mid{background:var(--warn);border-color:var(--warn);}
   .pill.pri.low{background:var(--sub);border-color:var(--sub);}
+  /* ── Google参考値 */
+  table.gquad{table-layout:fixed;} table.gquad th,table.gquad td{text-align:center;vertical-align:middle;}
+  table.gquad td.qc{cursor:pointer;border:1px solid var(--line);border-radius:8px;padding:10px 6px;}
+  table.gquad td.qc:hover{outline:2px solid var(--accent);}
+  table.gquad td.qc.sel{outline:3px solid var(--accent);}
+  table.gquad .n{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;}
+  table.gquad .lb{font-size:12px;font-weight:700;} table.gquad .ds{font-size:11px;color:var(--sub);}
+  .q-geo{background:#fdecea;} .q-geo .lb{color:var(--bad);}
+  .q-both{background:#e8f5ee;} .q-both .lb{color:var(--good);}
+  .q-ai{background:#eef4ff;} .q-ai .lb{color:var(--accent);}
+  .q-weak{background:#fdf6e7;} .q-weak .lb{color:var(--warn);}
+  .q-none{background:var(--panel);}
+  .judge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap;}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .approx{color:var(--warn);font-weight:700;cursor:help;} .gap{color:var(--warn);cursor:help;}
   .pill.own{color:var(--accent);border-color:var(--accent);background:#fff;font-weight:700;}
   .qgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
   @media(max-width:960px){.qgrid{grid-template-columns:1fr;}}
@@ -964,6 +1021,32 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </section>
 
+  <!-- Google参考値（GSC ＝ 自社サイトの Google 自然検索） -->
+  <section id="s-google">
+    <div class="summary" id="g-summary"></div>
+    <details class="howto"><summary>この画面の見方</summary>
+      <div class="body">Claude の出現と<b>同じ設問</b>について、Google 自然検索での自社サイトの順位（GSC＝Google Search Console）を<b>参考値</b>として並べます。
+        <b>①4象限</b>＝縦が Claude の出現（出現率が0%より大きいか）、横が Google の順位（10位以内＝1ページ目か）。
+        「<b>GEO優先</b>」＝Google では上位に出ているのに Claude には出ていない設問（ウェブに情報はあるが AI に届いていない）です。
+        <b>②設問一覧</b>＝行をクリックすると、期間ごとの値と推移が開きます。<b>③AI Overview</b>＝GSC「生成AI機能」レポートの表示回数。
+        <br>※ GSC は<b>自社サイトのみ</b>・<b>表示されたときの平均順位</b>です。1設問に1つの「GSC参照クエリ」（実際に検索されている近い語）で照合しており、
+        観測キーワードとずれる場合は「≈」を付けています。GSC に出てこない語は<b>データなし</b>（検索されていない／自社が出ていない／上位1,000件の外）で、0位ではありません。</div>
+    </details>
+    <div class="filters" id="filters-google"></div>
+    <div class="card"><h3>① 4象限（設問数 ／ クリックで一覧を絞り込み）</h3><div id="g-quad"></div>
+      <div class="muted" id="g-quad-note" style="margin-top:8px"></div></div>
+    <h2>② 設問一覧</h2>
+    <div class="card xtab"><div id="g-table"></div></div>
+    <h2>③ AI Overview（GSC 生成AI機能：自社ページが表示された回数）</h2>
+    <div class="grid g2">
+      <div class="card"><h3>日別の表示回数</h3><div class="filters" id="g-ai-filters" style="margin:0 0 10px;padding:8px 10px"></div>
+        <div class="bar-wrap" style="max-height:320px"><canvas id="chart-g-ai" height="280"></canvas></div></div>
+      <div class="card"><h3>表示回数の多いページ</h3><div id="g-ai-pages" class="bar-wrap"></div></div>
+    </div>
+    <details class="howto" style="margin-top:16px"><summary>GSC ファイルの取り込み状況</summary>
+      <div class="body" id="g-log"></div></details>
+  </section>
+
   <!-- P2: 引用URL -->
   <section id="s-url">
     <div class="summary" id="url-summary"></div>
@@ -1015,7 +1098,7 @@ $("#hdr-sub").innerHTML =
 const TABS = [
   ["s-home","ホーム"],
   ["s-comp","競合共起 (P1)"],["s-context","回答分析"],["s-cross","多軸クロス集計 (P1)"],
-  ["s-compare","過去回比較"],["s-runs","全回サマリー"],
+  ["s-compare","過去回比較"],["s-runs","全回サマリー"],["s-google","Google参考値"],
   ["s-url","引用URL (P2)"],["s-self","自社突合 (P2)"],["s-p3","競合サイト (P3)"]
 ];
 const tabsEl = $("#tabs");
@@ -1024,7 +1107,7 @@ function showTab(id){
   $$("section").forEach(s=>s.classList.remove("active")); $("#"+id).classList.add("active");
   if(id==="s-comp") renderComp(); if(id==="s-context") renderContext();
   if(id==="s-cross") renderCross(); if(id==="s-compare") renderCompare();
-  if(id==="s-runs") renderRuns();
+  if(id==="s-runs") renderRuns(); if(id==="s-google") renderGoogle();
 }
 TABS.forEach(([id,label],i)=>{
   const b=document.createElement("div"); b.className="tab"+(i===0?" active":""); b.textContent=label;
@@ -1893,8 +1976,265 @@ FSTATE.compare = {gran:"run"};
   const extra=[mk("_rax","domain"),mk("_cax","tier")];
   buildFilters("filters-cross","cross",renderCross,extra);
 })();
+// ─────────────────────────────────────────── Google参考値（GSC）
+const G = Object.assign({available:false,periods:[],keywords:{},ref:{},daily:{},ai_pages:{},log:[],warnings:[],
+  sites:{},action_notes:[]}, DATA.google||{});
+const GS = {period:"latest", set:"", domain:"", cell:"", aiSite:"", aiPeriod:""};
+const G_SEARCH_PERIODS = arr(G.periods).filter(p=>arr(p.sites).length);
+const G_SITE_ORDER = Object.keys(G.sites||{});
+const siteLabel = s => ((G.sites||{})[s]||{}).label || s;
+const byEndDesc = (a,b) => a.end<b.end?1:(a.end>b.end?-1:0);
+HELP.gsc = "GSC（Google Search Console）＝自社サイトが Google 検索でどう表示されたかの公式データ。自社サイトのみ・表示されたときの平均順位で、競合は見えません。毎月、前月1日〜末日で書き出したファイルを置くと月次で比較できます。";
+const G_CELLS = {
+  "hit|top": {label:"両方強い",    cls:"q-both", desc:"維持"},
+  "hit|low": {label:"AIでは強い",  cls:"q-ai",   desc:"SEO の基本を整える"},
+  "hit|none":{label:"AIでは出現",  cls:"q-ai",   desc:"Google はデータなし"},
+  "miss|top":{label:"GEO優先 ★",  cls:"q-geo",  desc:"ウェブにはあるが AI に届いていない"},
+  "miss|low":{label:"両方弱い",    cls:"q-weak", desc:"コンテンツを作る・強化する"},
+  "miss|none":{label:"判定保留",   cls:"q-none", desc:"Google データなし（検索チェック待ち）"},
+};
+const G_ORDER = ["miss|top","miss|low","hit|low","hit|top","hit|none","miss|none"];
+const fmtN = v => v==null ? "–" : Number(v).toLocaleString("ja-JP");
+const fmtPos = v => v==null ? "–" : (Math.round(v*10)/10).toFixed(1)+"位";
+
+// 期間の選び方：latest＝サイトごとに最新のファイル（月次があれば最新の月次、無ければ最新の期間集計）
+function gSitePeriods(sel){
+  const out={};
+  if(sel==="latest"){
+    G_SITE_ORDER.forEach(s=>{
+      const c=G_SEARCH_PERIODS.filter(p=>p.sites.includes(s));
+      const p=c.filter(p=>p.monthly).sort(byEndDesc)[0] || c.filter(p=>!p.monthly).sort(byEndDesc)[0];
+      if(p) out[s]=p;
+    });
+  } else {
+    const p=G_SEARCH_PERIODS.find(p=>p.key===sel);
+    if(p) p.sites.forEach(s=>out[s]=p);
+  }
+  return out;
+}
+// Claude 側の集計期間：Google 側が月次ならその月、月次でなければ全期間
+function gClaudeWindow(sel){
+  const monthly=G_SEARCH_PERIODS.filter(p=>p.monthly).sort(byEndDesc);
+  let p=null;
+  if(sel==="latest") p=monthly[0]||null;
+  else { const x=G_SEARCH_PERIODS.find(q=>q.key===sel); if(x && x.monthly) p=x; }
+  return p ? {start:p.start,end:p.end,label:`${p.key}（Google と同じ月）`}
+           : {start:"",end:"",label:"全期間（Google 側が月単位のファイルでないため）"};
+}
+function gClaudeStats(win){
+  const m={};
+  ROWS.forEach(r=>{ if(!isValid(r)) return;
+    if(win.start && (r.date<win.start || r.date>win.end)) return;
+    const o=m[r.qid]||(m[r.qid]={n:0,h:0}); o.n++; if(r.hit) o.h++; });
+  return m;
+}
+const G_QINFO = (()=>{ const m={};
+  Object.entries(G.keywords||{}).forEach(([q,k])=>{ m[q]={qid:q,question:k.q||"",set:String(k.set||"").toLowerCase(),
+    domain:"",domain_label:k.domain_label||"",tier:""}; });
+  ROWS.forEach(r=>{ m[r.qid]={qid:r.qid,question:r.question,set:r.set,domain:r.domain,
+    domain_label:r.domain_label,tier:r.tier}; });
+  return m; })();
+function gRef(k, sp){ // GSC参照クエリの値（代表＝表示回数が最大のサイト）
+  if(!k || !k.refn) return {best:null,all:[]};
+  const byP=(G.ref||{})[k.refn]||{}, list=[];
+  Object.entries(sp).forEach(([s,p])=>{ const v=(byP[p.key]||{})[s];
+    if(v) list.push({site:s,period:p,clk:v[0],imp:v[1],pos:v[2],q:v[3]}); });
+  list.sort((a,b)=>(b.imp||0)-(a.imp||0));
+  return {best:list[0]||null,all:list};
+}
+function gItems(opt){
+  const sp=gSitePeriods(opt.period), win=gClaudeWindow(opt.period), cs=gClaudeStats(win);
+  const items=Object.keys(G_QINFO).sort().filter(q=>{
+    const info=G_QINFO[q];
+    return (!opt.set || info.set===opt.set) && (!opt.domain || info.domain===opt.domain);
+  }).map(q=>{
+    const info=G_QINFO[q], k=(G.keywords||{})[q]||null, c=cs[q];
+    const claude=c?{n:c.n,h:c.h,rate:Math.round(c.h/c.n*1000)/10}:null;
+    const ref=gRef(k,sp), b=ref.best;
+    const gy=!b?"none":(b.pos!=null && b.pos<=10?"top":"low");
+    const cy=claude?(claude.h>0?"hit":"miss"):"";
+    return {q,info,k,claude,ref,b,gy,cy,cell:cy?`${cy}|${gy}`:""};
+  });
+  return {items,sp,win};
+}
+function gCounts(items){ const c={}; items.forEach(it=>{ if(it.cell) c[it.cell]=(c[it.cell]||0)+1; }); return c; }
+function gPeriodText(sp){
+  const byKey={};
+  Object.entries(sp).forEach(([s,p])=>{ (byKey[p.key]||(byKey[p.key]={p,sites:[]})).sites.push(s); });
+  return Object.values(byKey).map(x=>`${x.sites.join("・")}：${esc(x.p.monthly?x.p.key:x.p.label)}`).join("／");
+}
+function buildGoogleFilters(){
+  const mount=$("#filters-google"); mount.innerHTML="";
+  const mk=(label,key,opts)=>{ const f=document.createElement("div"); f.className="f";
+    const lab=document.createElement("label"); lab.textContent=label;
+    const sel=document.createElement("select");
+    sel.innerHTML=opts.map(([v,t])=>`<option value="${escAttr(v)}">${esc(t)}</option>`).join("");
+    sel.value=GS[key]; sel.onchange=()=>{ GS[key]=sel.value; GS.cell=""; renderGoogle(); };
+    f.appendChild(lab); f.appendChild(sel); mount.appendChild(f); };
+  mk("Google 期間","period",[["latest","最新（サイトごとの最新ファイル）"]]
+    .concat(G_SEARCH_PERIODS.map(p=>[p.key,(p.monthly?p.key:p.label)+`（${p.sites.join("・")}）`])));
+  mk("質問セット","set",[["","すべて"]].concat(D.sets.map(s=>[s,SET_LABELS[s]||s])));
+  mk("ドメイン","domain",[["","すべて"]].concat(D.domains.map(d=>[d,optLabel("domain",d)])));
+  const rf=document.createElement("div"); rf.className="f";
+  const rb=document.createElement("button"); rb.className="reset"; rb.textContent="リセット";
+  rb.onclick=()=>{ Object.assign(GS,{period:"latest",set:"",domain:"",cell:""}); buildGoogleFilters(); renderGoogle(); };
+  rf.appendChild(document.createElement("label")); rf.appendChild(rb); mount.appendChild(rf);
+}
+function gCell(key){ GS.cell = GS.cell===key ? "" : key; renderGoogle(); }
+function renderGoogle(){
+  const {items,sp,win}=gItems(GS), cnt=gCounts(items);
+  const noClaude=items.filter(it=>!it.cy).length, noG=items.filter(it=>it.gy==="none").length;
+  const warn=arr(G.warnings).map(w=>`<div class="muted">⚠ ${esc(w)}</div>`).join("");
+  $("#g-summary").innerHTML = !G.available
+    ? `Google参考値${help("gsc")}：<b>GSC データなし</b>。GSC の Excel を ${esc(G.dir||"gsc_dir（未設定）")} に置いて再生成してください。${warn}`
+    : `対象 <b>${items.length}</b> 問のうち、<b>GEO優先 ${cnt["miss|top"]||0} 問</b>（Google 10位以内なのに Claude で出ていない）、`
+      +`両方強い ${cnt["hit|top"]||0} 問、両方弱い ${cnt["miss|low"]||0} 問、Google データなし ${noG} 問。`
+      +`<br><span class="muted">Google${help("gsc")}：${gPeriodText(sp)||"–"} ／ Claude：${esc(win.label)}（有効行で集計）</span>${warn}`;
+
+  const cellTd=key=>{ const c=G_CELLS[key];
+    return `<td class="qc ${c.cls}${GS.cell===key?" sel":""}" onclick="gCell('${key}')">
+      <div class="lb">${esc(c.label)}</div><div class="n">${cnt[key]||0}</div><div class="ds">${esc(c.desc)}</div></td>`; };
+  $("#g-quad").innerHTML = `<table class="gquad"><tr><th style="width:17%"></th>
+      <th>Google 10位以内</th><th>Google 11位以下</th><th>Google データなし</th></tr>
+    <tr><th>Claude 出現あり<div class="muted">（出現率 &gt; 0%）</div></th>${cellTd("hit|top")}${cellTd("hit|low")}${cellTd("hit|none")}</tr>
+    <tr><th>Claude 出現なし<div class="muted">（出現率 0%）</div></th>${cellTd("miss|top")}${cellTd("miss|low")}${cellTd("miss|none")}</tr></table>`;
+  $("#g-quad-note").innerHTML = (GS.cell?`「${esc(G_CELLS[GS.cell].label)}」で一覧を絞り込み中（もう一度クリックで解除）。`:"")
+    + (noClaude?` Claude の有効な回答がない設問 ${noClaude} 問は4象限に含めていません。`:"");
+
+  const list=items.filter(it=>!GS.cell || it.cell===GS.cell).sort((a,b)=>{
+    const ia=a.cell?G_ORDER.indexOf(a.cell):99, ib=b.cell?G_ORDER.indexOf(b.cell):99;
+    if(ia!==ib) return ia-ib;
+    const pa=a.b?a.b.pos:999, pb=b.b?b.b.pos:999;
+    return pa!==pb ? pa-pb : (a.q<b.q?-1:1); });
+  $("#g-table").innerHTML = !list.length ? nodata("該当する設問がありません") :
+    `<table><tr><th>判定</th><th>設問</th><th>Claude</th><th>観測キーワード</th><th>GSC参照クエリ</th>
+      <th>サイト</th><th>平均順位</th><th>表示回数</th><th>クリック</th></tr>`
+    + list.map(it=>{ const c=it.cell?G_CELLS[it.cell]:null, k=it.k||{}, b=it.b;
+      const judge=c?`<span class="judge ${c.cls}">${esc(c.label)}</span>`:`<span class="muted">Claude 未計測</span>`;
+      const setTag=it.info.set?`<span class="pill">${esc(it.info.set.replace(/^set/,"Set"))}</span>`:"";
+      const tier=it.info.tier?`<span class="pill">${esc(it.info.tier)}</span>`:"";
+      const obs=k.obs?esc(k.obs)+(k.gap?` <span class="gap" title="${escAttr("意図のズレ："+k.gap)}">⚠</span>`:""):`<span class="muted">未設定</span>`;
+      const ref=k.ref?((k.refdiff && k.refdiff!=="同一")?`<span class="approx" title="${escAttr(k.refdiff)}">≈</span> `:"")+esc(k.ref)
+                     :`<span class="muted">なし</span>`;
+      const more=it.ref.all.length>1?` <span class="muted">+${it.ref.all.length-1}</span>`:"";
+      return `<tr class="click" onclick="gDetail('${escAttr(it.q)}')"><td>${judge}</td>
+        <td>${esc(it.info.question||"")}<div class="muted">${esc(it.q)} ${setTag}${tier} ${esc(it.info.domain_label||"")}</div></td>
+        <td class="num">${it.claude?`${it.claude.rate}%<div class="muted">${it.claude.h}/${it.claude.n}</div>`:"–"}</td>
+        <td>${obs}</td><td>${ref}</td>
+        <td>${b?esc(b.site)+more:"–"}</td>
+        <td class="num">${b?fmtPos(b.pos):`<span class="muted">データなし</span>`}</td>
+        <td class="num">${b?fmtN(b.imp):"–"}</td><td class="num">${b?fmtN(b.clk):"–"}</td></tr>`; }).join("")
+    + `</table><div class="muted" style="margin-top:6px">⚠＝観測キーワードで設問から落ちた要素あり ／ ≈＝GSC参照クエリが観測キーワードより広い（近い語で代用）。記号にマウスを乗せると内容が出ます。行クリックで詳細。</div>`;
+  renderGoogleAI();
+  renderGoogleLog();
+}
+let gDetailChart=null;
+function gDetail(q){
+  const info=G_QINFO[q]||{}, k=(G.keywords||{})[q]||{};
+  const byP=(G.ref||{})[k.refn]||{};
+  const periods=G_SEARCH_PERIODS.slice().sort((a,b)=>a.start<b.start?-1:1);
+  const gRows=[];
+  periods.forEach(p=>p.sites.forEach(s=>{ const v=(byP[p.key]||{})[s];
+    if(v) gRows.push(`<tr><td>${esc(p.monthly?p.key:p.label)}</td><td>${esc(s)}｜${esc(siteLabel(s))}</td>
+      <td class="num">${fmtPos(v[2])}</td><td class="num">${fmtN(v[1])}</td><td class="num">${fmtN(v[0])}</td><td>${esc(v[3])}</td></tr>`); }));
+  const cm={};
+  ROWS.filter(r=>r.qid===q && isValid(r)).forEach(r=>{ const m=(r.date||"").slice(0,7); if(!m) return;
+    const o=cm[m]||(cm[m]={n:0,h:0}); o.n++; if(r.hit) o.h++; });
+  const monthsG=periods.filter(p=>p.monthly).map(p=>p.key);
+  const months=[...new Set(Object.keys(cm).concat(monthsG))].sort();
+  const posOf=m=>{ const x=byP[m]; if(!x) return null; const v=Object.values(x).sort((a,b)=>(b[1]||0)-(a[1]||0))[0]; return v?v[2]:null; };
+  const notes=arr(G.action_notes).filter(n=>arr(n.qids).includes(q));
+  const canChart=monthsG.length>=1 && months.length>=2;
+  openModal(`<h3>${esc(info.question||q)}</h3>
+    <div class="meta">${esc(q)} ／ ${esc(info.domain_label||"")}</div>
+    <table><tr><th>観測キーワード</th><td>${esc(k.obs||"未設定")}${k.gap?`<div class="muted">意図のズレ：${esc(k.gap)}</div>`:""}</td></tr>
+      <tr><th>GSC参照クエリ</th><td>${esc(k.ref||"なし")}${k.ref&&k.refdiff?`<div class="muted">${esc(k.refdiff)}</div>`:""}</td></tr></table>
+    <h3 style="margin-top:14px">GSC（期間 × サイト）</h3>
+    ${gRows.length?`<table><tr><th>期間</th><th>サイト</th><th>平均順位</th><th>表示回数</th><th>クリック</th><th>GSC上のクエリ</th></tr>${gRows.join("")}</table>`
+      :nodata(k.ref?"GSC参照クエリが、取り込んだ GSC ファイルに出てきません":"この設問には GSC参照クエリがありません（検索チェックで確認します）")}
+    <h3 style="margin-top:14px">推移（月別：Google 平均順位 と Claude 出現率）</h3>
+    ${canChart?`<div style="height:260px"><canvas id="chart-g-detail"></canvas></div>`
+      :`<div class="muted">月単位の GSC ファイル（前月1日〜末日）が入ると、ここに月別の推移が出ます。</div>`}
+    <table style="margin-top:8px"><tr><th>月</th><th>Claude 出現率</th><th>Google 平均順位</th></tr>
+      ${months.map(m=>`<tr><td>${m}</td><td class="num">${cm[m]?`${Math.round(cm[m].h/cm[m].n*1000)/10}%（${cm[m].h}/${cm[m].n}）`:"–"}</td>
+        <td class="num">${monthsG.includes(m)?(posOf(m)!=null?fmtPos(posOf(m)):"データなし"):"–"}</td></tr>`).join("")}</table>
+    <h3 style="margin-top:14px">施策の記録（config.json の action_notes）</h3>
+    ${notes.length?`<ul class="notes">${notes.map(n=>`<li><b>${esc(n.date)}</b> ${esc(n.note)}</li>`).join("")}</ul>`
+      :`<div class="muted">記録なし</div>`}`);
+  if(gDetailChart){ gDetailChart.destroy(); gDetailChart=null; }
+  if(canChart){
+    gDetailChart=new Chart($("#chart-g-detail"),{type:"line",
+      data:{labels:months,datasets:[
+        {label:"Google 平均順位（左・上ほど上位）",data:months.map(m=>monthsG.includes(m)?posOf(m):null),yAxisID:"yPos",
+         borderColor:"#b7791f",backgroundColor:"#b7791f",spanGaps:true},
+        {label:"Claude 出現率 %（右）",data:months.map(m=>cm[m]?Math.round(cm[m].h/cm[m].n*1000)/10:null),yAxisID:"yRate",
+         borderColor:"#1d4f91",backgroundColor:"#1d4f91",spanGaps:true}]},
+      options:{maintainAspectRatio:false,scales:{
+        yPos:{position:"left",reverse:true,min:1,title:{display:true,text:"順位"}},
+        yRate:{position:"right",min:0,suggestedMax:100,grid:{drawOnChartArea:false},title:{display:true,text:"%"}}}}});
+  }
+}
+let gAiChart=null;
+function renderGoogleAI(){
+  const aiSites=G_SITE_ORDER.filter(s=>arr(((G.daily||{})[s]||{}).ai).length);
+  const aiPeriods=Object.keys(G.ai_pages||{}).map(k=>G.periods.find(p=>p.key===k)||{key:k,label:k,end:""}).sort(byEndDesc);
+  if(!GS.aiPeriod && aiPeriods.length) GS.aiPeriod=aiPeriods[0].key;
+  const mount=$("#g-ai-filters");
+  if(!mount.dataset.built){
+    mount.dataset.built="1";
+    const mk=(label,key,opts)=>{ const f=document.createElement("div"); f.className="f";
+      const lab=document.createElement("label"); lab.textContent=label; const sel=document.createElement("select");
+      sel.innerHTML=opts.map(([v,t])=>`<option value="${escAttr(v)}">${esc(t)}</option>`).join("");
+      sel.value=GS[key]; sel.onchange=()=>{ GS[key]=sel.value; renderGoogleAI(); };
+      f.appendChild(lab); f.appendChild(sel); mount.appendChild(f); };
+    mk("サイト","aiSite",[["","すべて（サイト別の線）"]].concat(aiSites.map(s=>[s,`${s}｜${siteLabel(s)}`])));
+    mk("ページ一覧の期間","aiPeriod",aiPeriods.map(p=>[p.key,p.monthly?p.key:p.label]));
+  }
+  if(gAiChart){ gAiChart.destroy(); gAiChart=null; }
+  const show=GS.aiSite?[GS.aiSite]:aiSites;
+  if(!show.length){ $("#g-ai-pages").innerHTML=nodata("GSC「生成AI機能」レポートがありません"); return; }
+  const dates=[...new Set(show.flatMap(s=>arr(G.daily[s].ai).map(d=>d[0])))].sort();
+  const colors=["#1d4f91","#c0392b","#1a7f4b","#b7791f","#7b3fa0","#0f7c8c"];
+  gAiChart=new Chart($("#chart-g-ai"),{type:"line",
+    data:{labels:dates,datasets:show.map((s,i)=>{ const m=Object.fromEntries(arr(G.daily[s].ai).map(d=>[d[0],d[2]]));
+      return {label:`${s}｜${siteLabel(s)}`,data:dates.map(d=>m[d]??null),borderColor:colors[i%colors.length],
+        backgroundColor:colors[i%colors.length],pointRadius:0,borderWidth:1.5,spanGaps:true}; })},
+    options:{maintainAspectRatio:false,interaction:{mode:"index",intersect:false},
+      scales:{x:{ticks:{maxTicksLimit:10}},y:{min:0,title:{display:true,text:"表示回数"}}}}});
+  const pp=(G.ai_pages||{})[GS.aiPeriod]||{};
+  const pages=show.flatMap(s=>arr(pp[s]).map(x=>({s,u:x[0],n:x[1]}))).sort((a,b)=>b.n-a.n).slice(0,30);
+  $("#g-ai-pages").innerHTML = pages.length
+    ? `<table><tr><th>サイト</th><th>ページ</th><th>表示回数</th></tr>${pages.map(x=>`<tr><td>${esc(x.s)}</td>
+        <td style="word-break:break-all"><a href="${escAttr(x.u)}" target="_blank" rel="noopener">${esc(x.u)}</a></td>
+        <td class="num">${fmtN(x.n)}</td></tr>`).join("")}</table>`
+    : nodata("この期間・サイトのページデータがありません");
+}
+function renderGoogleLog(){
+  $("#g-log").innerHTML = `<div>GSC フォルダ：${esc(G.dir||"未設定")}</div>`
+    + arr(G.warnings).map(w=>`<div>⚠ ${esc(w)}</div>`).join("")
+    + (arr(G.log).length?`<table style="margin-top:8px"><tr><th>状態</th><th>ファイル</th><th>サイト</th><th>種類</th><th>期間</th><th>メモ</th></tr>`
+      + G.log.map(l=>`<tr><td class="nw">${esc(l.status)}</td><td>${esc(l.file)}</td><td>${esc(l.site)}</td>
+        <td>${l.kind==="ai"?"生成AI機能":(l.kind==="search"?"検索パフォーマンス":"–")}</td><td>${esc(l.period)}</td>
+        <td>${esc(l.note)}</td></tr>`).join("")+`</table>`:`<div>GSC ファイルが見つかりません。</div>`);
+}
+function renderHomeGoogle(){ // ホーム「1) 今回の結論」の末尾に1行
+  const el=$("#home-concl"); if(!el) return;
+  let body;
+  if(!G.available) body=`<b>Google参考値</b>${help("gsc")}：<b>データなし</b>（GSC ファイル未取り込み）`;
+  else {
+    const {items,sp}=gItems({period:"latest",set:"",domain:""}), c=gCounts(items);
+    const noG=items.filter(it=>it.gy==="none").length;
+    body=`<b>Google参考値</b>${help("gsc")}：<b>GEO優先 ${c["miss|top"]||0} 問</b>`
+      +`（Google 10位以内なのに Claude で出ていない）／両方強い ${c["hit|top"]||0} 問／両方弱い ${c["miss|low"]||0} 問／`
+      +`Google データなし ${noG} 問 <span class="muted">（${gPeriodText(sp)}）</span>`;
+  }
+  el.insertAdjacentHTML("beforeend", `<div class="set-box">${body}
+    <button class="noprint" style="margin-left:8px" onclick="showTab('s-google')">Google参考値タブへ</button></div>`);
+}
+buildGoogleFilters();
+
 renderComp(); renderContext(); renderCross(); renderUrl(); renderSelf(); renderCompare(); renderRuns();
-renderHome();
+renderHome(); renderHomeGoogle();
 </script>
 </body>
 </html>
