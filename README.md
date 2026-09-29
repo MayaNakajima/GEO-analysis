@@ -15,7 +15,7 @@
 | 見る人 | **関係者（唯一の入口）** | **運用者向け**（計測の監視・不具合の確認） |
 | 入口 | 「ホーム」タブ：今どうなっているか → なぜか → 次に何をするか → 何を議論するか | 各 HTML を個別に開く |
 | 入力 | `results/*.csv`（回答全文）＋ `reports/index.json`・`reports/insights_*.json`（読むだけ） | `reports/*.json` |
-| 見るもの | ホーム（結論・注意・次にやること・議論ポイント）＋ 詳細タブ（推移・比較・競合共起・回答分析・クロス集計・引用URL・自社突合） | 出現率・推移・崖・ブレ、示唆レポート |
+| 見るもの | ホーム（結論・注意・次にやること・議論ポイント）＋ 詳細タブ（推移・比較・競合共起・回答分析・クロス集計・Google参考値・引用URL・自社突合） | 出現率・推移・崖・ブレ、示唆レポート |
 | 置き場所 | Box「GEO-analysis」 | Box「GEO」 |
 
 monitoring は一切変更せず、出力ファイルを読むだけの疎結合です。示唆（insights）の中身は monitoring 側で作られ、本アプリはそれをホームに要約して見せます。
@@ -46,6 +46,9 @@ python generate.py --results-dir "C:\Users\612316\Documents\GitHub\GEO\monitorin
 ```
 
 > 実行手順の詳細（Anaconda Prompt の起動・パス一覧・トラブルシューティング）は `docs/実行手順書_v1.md` を参照。
+
+**Google参考値タブ**：毎月、GSC の Excel（6 サイト × 検索パフォーマンス／生成AI機能）を `config.json` の `gsc_dir` に置くと、
+Claude の出現と Google 自然検索の順位を同じ設問で並べて表示します（手順は `docs/実行手順書_v1.md` の D-2）。
 
 生成された `analysis.html` をブラウザで開くだけで動きます（外部依存は CDN の Chart.js のみ）。
 CSV を再測定・追加したら `python generate.py` を再実行すれば最新データで更新されます。

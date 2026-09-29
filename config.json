@@ -20,5 +20,8 @@
     "ABM横断（複数事業クロス）": "横断",
     "ABM横断・コトデザイン": "横断"
   },
-  "grounding_model_keywords": ["perplexity", "sonar", "grounding", "search"]
+  "grounding_model_keywords": ["perplexity", "sonar", "grounding", "search"],
+  "gsc_dir": "C:\\Users\\612316\\Box\\【個人】612316_中島　麻耶\\17_DSP広告分析ダッシュボード\\data",
+  "google_keywords_csv": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\monitoring\\config\\google_keywords.csv",
+  "action_notes": []
 }
