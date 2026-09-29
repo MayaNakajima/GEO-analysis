@@ -716,6 +716,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .kpi-box .lbl{font-size:12px;color:var(--sub);}
   .kpi-box .val{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;}
   .kpi-box .dt{font-size:12px;color:var(--sub);}
+  .set-box{margin-top:10px;padding:8px 14px;border:1px solid var(--line);border-radius:10px;}
+  .set-row{display:flex;flex-wrap:wrap;gap:4px 22px;align-items:baseline;font-size:13px;line-height:1.7;}
+  .set-curve{margin-top:2px;font-size:13px;line-height:1.7;} .set-val{font-size:16px;}
   .delta-up{color:var(--good);font-weight:700;} .delta-down{color:var(--bad);font-weight:700;}
   .delta-flat{color:var(--sub);font-weight:700;} .delta-na{color:var(--warn);font-weight:700;}
   .notes li{margin:4px 0;line-height:1.7;font-size:13.5px;}
@@ -758,6 +761,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .hblock>h2,.hblock>summary{font-size:12.5px;margin-bottom:5px;}
     .concl{font-size:12.5px;margin-bottom:6px;line-height:1.6;}
     .kpi-box{padding:5px 9px;} .kpi-box .val{font-size:18px;}
+    .set-box{margin-top:5px;padding:3px 9px;} .set-row,.set-curve{font-size:10.5px;line-height:1.45;} .set-val{font-size:12px;}
+    .pill{font-size:9.5px;padding:0 6px;} .act .k{margin-top:2px;font-size:10px;} .kpi-box .lbl,.kpi-box .dt{font-size:10px;}
+    .kpis,.acts{gap:8px!important;} .home-head{margin:0 0 6px;} .home-head .ttl{font-size:14px;}
     .notes li{font-size:11px;margin:1px 0;line-height:1.5;}
     .act{padding:6px 9px;font-size:10.5px;line-height:1.5;}
     .act .hd{font-size:11.5px;}
@@ -1625,6 +1631,27 @@ function topActions(){
   return ins.actions.filter(a=>a && typeof a==="object").map((a,i)=>({a,i}))
     .sort((x,y)=>((PRI[x.a.priority]??9)-(PRI[y.a.priority]??9))||x.i-y.i).slice(0,3).map(o=>o.a);
 }
+// 質問セット別（Set1＝一般質問／Set2＝特異度つき）の出現率と前回比 ＋ Set2 の特異度カーブ（D1→D4）
+const SET_LABELS={set1:"Set1（一般質問）",set2:"Set2（特異度つき D1〜D4）"};
+function homeSetBreakdown(lr,pr,brk,hasPrev){
+  const sets=D.sets.filter(s=>lr.some(r=>r.set===s));
+  if(!sets.length) return "";
+  const items=sets.map(s=>{ const c=homeStat(lr.filter(r=>r.set===s)), p=homeStat(pr.filter(r=>r.set===s));
+    return `<span class="set-item"><b>${esc(SET_LABELS[s]||s)}</b> <b class="set-val">${pct(c.rate)}</b>
+      <span class="muted">（${c.hits} / ${c.valid}）</span> 前回比 ${homeDelta(p.rate,c.rate,brk,hasPrev&&p.valid>0)}</span>`; }).join("");
+  // Set2 の特異度カーブ：有効行のある tier だけを並べ、D1 以外で最初に 10% 未満になる所を「崖」とする（describeCliff と同じ基準）
+  const s2=lr.filter(r=>r.set==="set2");
+  const seg=["D1","D2","D3","D4"].map(t=>[t,runRate(s2.filter(r=>r.tier===t))]).filter(([,v])=>v!=null);
+  let curve="";
+  if(seg.length){
+    const ci=seg.findIndex(([t,v],i)=>i>0 && v<10);
+    curve=`<div class="set-curve"><b>Set2 特異度カーブ</b>：`
+      + seg.map(([t,v])=>`${t} ${esc(D.tier_labels[t]||"")} <b>${v}%</b>`).join(" → ")
+      + (ci>0?`　<span class="delta-down">崖は ${seg[ci-1][0]}→${seg[ci][0]}</span><span class="muted">（${esc(D.tier_labels[seg[ci][0]]||"")}で ${seg[ci][1]}% に低下）</span>`:"")
+      + `</div>`;
+  }
+  return `<div class="set-box"><div class="set-row"><span class="muted">質問セット別（ヒット / 有効行）</span>${items}</div>${curve}</div>`;
+}
 function renderHome(){
   // 「回」はタイミング単位（同一タイミングの r1/r2 はまとめる。1タイミング1回なら全回サマリーの run 表示と同値）
   const units=D.timings.filter(u=>runRate(ROWS.filter(r=>r.timing===u))!=null);  // 有効行のある回だけ
@@ -1659,7 +1686,8 @@ function renderHome(){
       `<p class="concl">${esc(lab(L))} 実行分の出現率${help("rate")}は <b>${pct(all.rate)}</b>（有効行${help("valid")} ${all.valid} 件中 ${all.hits} 件）、`
       +`前回比 ${homeDelta(allP.rate,all.rate,brk,!!P)}。`
       +`指名質問${help("nom")}では <b>${pct(nom.rate)}</b>、非指名質問では <b>${pct(non.rate)}</b>。${verdict}</p>`
-      +`<div class="kpis">${kpi("全体の出現率",all,allP)}${kpi("指名質問（D1・社名系）",nom,nomP)}${kpi("非指名質問（D2以下・Set1一般）",non,nonP)}</div>`;
+      +`<div class="kpis">${kpi("全体の出現率",all,allP)}${kpi("指名質問（D1・社名系）",nom,nomP)}${kpi("非指名質問（D2以下・Set1一般）",non,nonP)}</div>`
+      + homeSetBreakdown(lr,pr,brk,!!P);
   }
 
   // 2) 計測上の注意
