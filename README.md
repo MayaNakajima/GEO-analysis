@@ -28,6 +28,10 @@ monitoring は一切変更せず、出力ファイルを読むだけの疎結合
 **いちばん簡単：`更新して開く.bat` をダブルクリック。** 最新 CSV で再生成 → 関係者用 BOX フォルダへコピー → ブラウザで開く、までを自動で行います。
 関係者は BOX の `GEO-analysis\analysis.html` を開くだけです。
 
+**自動更新**：`register_auto_update.bat` を一度ダブルクリックすると、タスクスケジューラ（`GEO_Analysis_AutoUpdate`）が毎日 14:30〜23:30 に1時間おきに確認し、
+monitoring に新しい計測結果があるときだけ `analysis.html` を再生成して BOX へコピーします（変更がなければ何もしない・画面は出ない・ログは `logs\auto_update.log`）。
+monitoring の計測（`GEO_AI_Monitoring`）は別のタスクなので、GEO-analysis 側で GEO を実行する必要はありません。
+
 コマンドで実行する場合：Python 標準ライブラリのみで動作します（追加インストール不要）。実行は **Anaconda Prompt** から。
 
 ```bat
@@ -149,6 +153,9 @@ GEO-analysis/
 ├─ generate.py     … データ処理＋HTML生成（stdlibのみ）
 ├─ config.json     … データパス・共有フォルダ・計測の注記・担当対応表
 ├─ 更新して開く.bat … ダブルクリックで 再生成→BOXへコピー→ブラウザ表示
+├─ register_auto_update.bat … 自動更新タスクの登録（-Unregister で解除）
+├─ tools/register_auto_update.ps1 … 上記の本体
+├─ logs/           … 自動更新のログ（.gitignore 対象）
 ├─ analysis.html   … 生成物（.gitignore 対象・再生成可能）
 ├─ README.md
 └─ .gitignore

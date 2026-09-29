@@ -507,8 +507,61 @@ def main():
     ap.add_argument("--reports-dir", default=None, help="monitoring/data/reports（ホームタブ用）")
     ap.add_argument("--open", action="store_true", help="生成後に analysis.html をブラウザで開く")
     ap.add_argument("--no-share", action="store_true", help="share_dirs へのコピーを行わない")
+    ap.add_argument("--skip-if-unchanged", action="store_true",
+                    help="入力が前回生成から変わっていなければ再生成しない（自動更新タスク用）")
+    ap.add_argument("--log", default=None, help="出力をこのファイルに追記する（自動更新タスク用）")
     args = ap.parse_args()
 
+    if not args.log:
+        return run(args)
+    # 自動更新タスク（pythonw＝画面なし）から呼ばれる場合：出力とエラーをログへ追記する
+    os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
+    with open(args.log, "a", encoding="utf-8") as lf:
+        sys.stdout = sys.stderr = lf
+        print(f"==== {datetime.now():%Y-%m-%d %H:%M:%S} generate.py 自動更新 ====")
+        try:
+            run(args)
+        except SystemExit as e:
+            if e.code not in (None, 0):
+                print(e.code if isinstance(e.code, str) else f"[ERROR] exit {e.code}")
+                raise
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            raise SystemExit(1)
+        finally:
+            lf.flush()
+            sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+
+
+# 変更判定：これらより analysis.html が新しければ「入力に変更なし」
+SETTLE_SECONDS = 600   # 直近10分以内に更新された入力は書き込み途中の可能性があるため次回に回す
+
+
+def _input_files(cfg, config_path):
+    files = glob.glob(os.path.join(cfg.get("results_dir", ""), "results_*.csv"))
+    rd = cfg.get("reports_dir", "")
+    if rd:
+        files += glob.glob(os.path.join(rd, "index.json")) + glob.glob(os.path.join(rd, "insights_*.json"))
+    files += [p for p in (cfg.get("reference_md", ""), config_path, os.path.abspath(__file__)) if p]
+    return [p for p in files if os.path.isfile(p)]
+
+
+def _share_is_stale(out, share_dirs):
+    """共有フォルダのコピーが無い・古い・サイズ違いなら True（前回コピー失敗の再試行用）。"""
+    if isinstance(share_dirs, str):
+        share_dirs = [share_dirs]
+    for d in share_dirs:
+        dst = os.path.join(d, os.path.basename(out))
+        if not os.path.isdir(d) or os.path.abspath(dst) == os.path.abspath(out):
+            continue
+        if (not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(out)
+                or os.path.getmtime(dst) + 2 < os.path.getmtime(out)):
+            return True
+    return False
+
+
+def run(args):
     cfg = load_config(args.config)
     if args.results_dir:
         cfg["results_dir"] = args.results_dir
@@ -521,6 +574,22 @@ def main():
 
     if not cfg.get("results_dir"):
         raise SystemExit("[ERROR] results_dir 未設定。config.json か --results-dir で指定してください。")
+
+    # results_*.csv が見つからない場合は変更判定をせず、下の load_rows でエラーとして記録させる
+    if args.skip_if_unchanged and glob.glob(os.path.join(cfg["results_dir"], "results_*.csv")):
+        out = cfg["output_html"]
+        inputs = _input_files(cfg, args.config)
+        newest = max((os.path.getmtime(p) for p in inputs), default=0)
+        if os.path.exists(out) and newest <= os.path.getmtime(out):
+            if not args.no_share and _share_is_stale(out, cfg.get("share_dirs") or []):
+                print("[SKIP] 入力に変更なし。共有フォルダのコピーが古いため、コピーだけ行います")
+                copy_to_share_dirs(out, cfg.get("share_dirs") or [])
+            else:
+                print("[SKIP] 入力に変更がないため再生成しません")
+            return
+        if datetime.now().timestamp() - newest < SETTLE_SECONDS:
+            print("[SKIP] 入力ファイルが直近10分以内に更新されています（計測中の可能性）。次回に再試行します")
+            return
 
     rows, files_meta = load_rows(cfg["results_dir"])
     ref = load_reference(cfg.get("reference_md", ""))

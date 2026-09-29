@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-09-29  branch: feature/auto-update-task
+- 目的：monitoring の計測後に analysis.html を手で作り直す手間をなくし、BOX の共有版を自動で最新に保つ。
+- 作業内容：
+  - `generate.py`：`--skip-if-unchanged`（入力が前回の analysis.html より新しくなければ再生成しない。BOX 側のコピーが古い・無いときはコピーだけ行う。入力が直近 10 分以内に更新されていれば計測中とみなし次回に回す。results CSV が見つからない場合はスキップせずエラーとして記録）と `--log`（出力・エラーをファイルに追記。pythonw＝画面なし実行用）を追加。既存の実行方法（bat・python generate.py）の挙動は変更なし。
+  - `tools/register_auto_update.ps1`＋`register_auto_update.bat`：タスク `GEO_Analysis_AutoUpdate` を登録／解除（毎日 14:30 から1時間おきに9時間、StartWhenAvailable、多重起動なし、30分で打ち切り、ログオン中ユーザー・通常権限）。スクリプトは文字化け回避のため ASCII のみ。
+  - `.gitignore` に `logs/` を追加。README・実行手順書（D-1 自動更新タスク・トラブル表）を更新。
+  - タスクをこの PC に登録済み（次回 2026-09-29 18:30）。
+- 確認：pythonw＋--log で (1) generate.py 編集直後→「10分以内に更新」でスキップ、(2) 出力なし→再生成＋共有フォルダへコピー、(3) 再実行→「変更なし」でスキップ、(4) 共有側のファイル削除→コピーだけ実行、(5) results_dir 不在→ログに [ERROR]・終了コード 1、を一時設定で確認。登録後にタスクを手動起動し、LastTaskResult=0、ログ追記、BOX の analysis.html 更新を確認。
+- コミット：（本コミット）／マージ：main への --no-ff マージコミット
+
+---
+
 ## 2026-09-29  branch: feature/home-set-breakdown
 - 目的：ホームで質問セット（Set1／Set2）の違いが分かるようにする（従来は2セット合算のみ）。
 - 作業内容：
