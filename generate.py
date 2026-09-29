@@ -176,6 +176,7 @@ def load_config(path):
         "gsc_sites": {},             # サイト略称 -> {label, domain}（空なら gsc_reader.GSC_SITES）
         "action_notes": [],          # 施策の記録 [{date, qids:[設問ID...], note}]（推移に表示）
         "google_check_dir": "",      # 検索チェックの記録。空なら results_dir の隣の google_check
+        "action_xlsx": "",           # 施策管理表（Excel）。空なら share_dirs の最初のフォルダの ACTION_XLSX_NAME
     }
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
@@ -188,6 +189,19 @@ def google_keywords_path(cfg):
     if not p and cfg.get("results_dir"):
         p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(cfg["results_dir"]))),
                          "config", "google_keywords.csv")
+    return p
+
+
+ACTION_XLSX_NAME = "Google参考値_施策管理.xlsx"
+
+
+def action_xlsx_path(cfg):
+    p = cfg.get("action_xlsx") or ""
+    sd = cfg.get("share_dirs") or []
+    if isinstance(sd, str):
+        sd = [sd]
+    if not p and sd:
+        p = os.path.join(sd[0], ACTION_XLSX_NAME)
     return p
 
 
@@ -213,6 +227,11 @@ def load_google(cfg):
             notes.append({"date": n["date"], "qids": [str(x) for x in (q if isinstance(q, list) else [q])],
                           "note": str(n.get("note", ""))})
     g["action_notes"] = sorted(notes, key=lambda n: n["date"])
+    try:
+        g["actions"] = gsc_reader.load_actions(action_xlsx_path(cfg))
+    except Exception as e:
+        g["actions"] = {"file": action_xlsx_path(cfg), "rows": [], "by_q": {}, "warnings": [f"施策管理表の読み込みに失敗しました（{e}）"]}
+    g.setdefault("warnings", []).extend(g["actions"]["warnings"])
     try:
         g["checks"] = gsc_reader.load_checks(google_check_dir(cfg), g.get("keywords") or {})
     except Exception as e:
@@ -593,6 +612,7 @@ def _input_files(cfg, config_path):
     files += gsc_reader.input_files(cfg.get("gsc_dir", ""))
     files += [google_keywords_path(cfg), os.path.abspath(gsc_reader.__file__)]
     files += gsc_reader.check_files(google_check_dir(cfg))
+    files += [action_xlsx_path(cfg)]
     return [p for p in files if p and os.path.isfile(p)]
 
 
@@ -676,7 +696,8 @@ def run(args):
     ck = google.get("checks") or {}
     print(f"     google: GSC {n_ok} ファイル取り込み／期間 {len(google.get('periods', []))}／"
           f"設問キーワード {len(google.get('keywords', {}))} 問／検索チェック "
-          + ("、".join(f"{m} {ck['stats'][m]['done']}件" for m in ck.get("months", [])) or "なし"))
+          + ("、".join(f"{m} {ck['stats'][m]['done']}件" for m in ck.get("months", [])) or "なし")
+          + f"／施策管理表 {len((google.get('actions') or {}).get('rows', []))} 行")
     for w in google.get("warnings", []):
         print(f"[WARN] {w}")
 
@@ -872,6 +893,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .judge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap;}
   td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}
   .approx{color:var(--warn);font-weight:700;cursor:help;} .gap{color:var(--warn);cursor:help;}
+  .pill.st{font-weight:700;color:var(--accent);border-color:var(--accent);}
+  .pill.st.mid{color:var(--warn);border-color:var(--warn);} .pill.st.good{color:var(--good);border-color:var(--good);}
+  .pill.st.low{color:var(--sub);border-color:var(--sub);}
   .pill.own{color:var(--accent);border-color:var(--accent);background:#fff;font-weight:700;}
   .qgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
   @media(max-width:960px){.qgrid{grid-template-columns:1fr;}}
@@ -1069,6 +1093,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="card"><h3>表示回数の多いページ</h3><div id="g-ai-pages" class="bar-wrap"></div></div>
     </div>
     <div class="card" style="margin-top:16px"><h3>検索チェック：AI による概要（Google が引用しているサイト）</h3><div id="g-ai-check"></div></div>
+    <details class="howto" style="margin-top:16px" id="g-act-howto"><summary>施策の記録の仕方（施策管理表）</summary>
+      <div class="body" id="g-act-body"></div></details>
     <details class="howto" style="margin-top:16px"><summary>GSC ファイルの取り込み状況</summary>
       <div class="body" id="g-log"></div></details>
   </section>
@@ -2005,7 +2031,7 @@ FSTATE.compare = {gran:"run"};
 // ─────────────────────────────────────────── Google参考値（GSC）
 const G = Object.assign({available:false,periods:[],keywords:{},ref:{},daily:{},ai_pages:{},log:[],warnings:[],
   sites:{},action_notes:[]}, DATA.google||{});
-const GS = {period:"latest", src:"auto", set:"", domain:"", owner:"", act:"", cell:"", aiSite:"", aiPeriod:""};
+const GS = {period:"latest", src:"auto", set:"", domain:"", owner:"", act:"", st:"", cell:"", aiSite:"", aiPeriod:""};
 const G_SEARCH_PERIODS = arr(G.periods).filter(p=>arr(p.sites).length);
 const G_SITE_ORDER = Object.keys(G.sites||{});
 const siteLabel = s => ((G.sites||{})[s]||{}).label || s;
@@ -2056,6 +2082,18 @@ function gJudge(src, b, ck){
   if(src==="gsc") return fromG;
   return fromCk(kw,"検索（KW）") || fromG;
 }
+// 施策管理表（Box の Excel）：1設問に複数行＝履歴。いちばん下の行を最新とみなす
+const G_ACT = Object.assign({file:"",mtime:"",rows:[],by_q:{},warnings:[]}, G.actions||{});
+const G_ST_CLS = {"未着手":"", "対応中":"mid", "完了":"good", "見送り":"low"};
+const gIsOpen = it => !["完了","見送り"].includes(it.st);     // まだ手を付ける必要がある
+function gActInfo(q){
+  const rows=G_ACT.by_q[q]||[], last=rows[rows.length-1]||null;
+  const owner=(G_ACT.owner||{})[q]||[...rows].reverse().map(r=>r.owner).find(Boolean)||"";
+  return {rows, last, st:(last&&last.status)||"", person:(last&&last.person)||"", owner};
+}
+const gStPill = it => it.st
+  ? `<span class="pill st ${G_ST_CLS[it.st]||""}">${esc(it.st)}</span>${it.person?`<div class="muted">${esc(it.person)}</div>`:""}`
+  : `<span class="muted">記入なし</span>`;
 const gPosText = g => !g ? "–" : (g.out || g.pos==null ? "上位10件に自社なし" : (g.src==="GSC" ? fmtPos(g.pos) : g.pos+"位"));
 const G_TODO = {
   fix:{title:"1. AI向けにページを直す", pri:"高",
@@ -2133,10 +2171,12 @@ function gItems(opt){
     const ref=gRef(k,sp), b=ref.best, ck=ckm[q]||null, g=gJudge(opt.src||"auto", b, ck);
     const gy=!g?"none":(!g.out && g.pos!=null && g.pos<=10?"top":"low");
     const cy=claude?(claude.h>0?"hit":"miss"):"";
+    const ai=gActInfo(q);
     return {q,info,k,claude,comp,ref,b,ck,g,gy,cy,cell:cy?`${cy}|${gy}`:"",act:gAction(cy,g),
-            owner:ownerOf(info.domain_label)};
+            owner:ai.owner||ownerOf(info.domain_label), st:ai.st, person:ai.person, arows:ai.rows};
   }).filter(it=>(!opt.set || it.info.set===opt.set) && (!opt.domain || it.info.domain===opt.domain)
-            && (!opt.owner || it.owner===opt.owner));
+            && (!opt.owner || it.owner===opt.owner)
+            && (!opt.st || (opt.st==="未着手" ? !it.st || it.st==="未着手" : it.st===opt.st)));
   return {items,sp,win,cm};
 }
 function gCounts(items,key){ const c={}; items.forEach(it=>{ const v=it[key||"cell"]; if(v) c[v]=(c[v]||0)+1; }); return c; }
@@ -2154,6 +2194,13 @@ function gWord(it){ // 判定に使った検索語
 }
 function gNext(it){ // 設問ごとの「次の一手」
   const k=it.k||{}, g=it.g, w=esc(gWord(it)), pos=gPosText(g), site=g&&g.site?`（${esc(g.site)}）`:"";
+  const last=(it.arows||[])[it.arows.length-1];
+  if(it.st==="完了") return `完了${last&&last.done?`（${esc(last.done)}）`:""}：${esc((last&&last.content)||"")} → 推移で効果を確認する`;
+  if(it.st==="見送り") return `見送り：${esc((last&&last.memo)||(last&&last.content)||"")}`;
+  const pre = it.st==="対応中" ? `<b>対応中</b>${last&&last.content?`（${esc(last.content)}）`:""}：` : "";
+  return pre + gNextBase(it, k, g, w, pos, site);
+}
+function gNextBase(it, k, g, w, pos, site){
   switch(it.act){
     case "fix":  return `「${w}」で ${pos}${site}のページに、社名・ブランド名、導入実績（具体名）、FAQ・比較表を追記する`;
     case "near": return `「${w}」は ${pos}。タイトル・見出しにこの語を入れ、関連ページから内部リンクを張って10位以内を目指す`;
@@ -2178,11 +2225,12 @@ function buildGoogleFilters(){
   mk("判定に使う Google の値","src",Object.entries(G_SRC));
   mk("担当","owner",[["","すべて"]].concat(G_OWNERS().map(o=>[o,o])));
   mk("やること","act",[["","すべて"]].concat(G_ACT_ORDER.map(a=>[a,G_ACTIONS[a].label])));
+  mk("施策の状態","st",[["","すべて"],["未着手","未着手（記入なしを含む）"],["対応中","対応中"],["完了","完了"],["見送り","見送り"]]);
   mk("質問セット","set",[["","すべて"]].concat(D.sets.map(s=>[s,SET_LABELS[s]||s])));
   mk("ドメイン","domain",[["","すべて"]].concat(D.domains.map(d=>[d,optLabel("domain",d)])));
   const rf=document.createElement("div"); rf.className="f";
   const rb=document.createElement("button"); rb.className="reset"; rb.textContent="リセット";
-  rb.onclick=()=>{ Object.assign(GS,{period:"latest",src:"auto",set:"",domain:"",owner:"",act:"",cell:""}); buildGoogleFilters(); renderGoogle(); };
+  rb.onclick=()=>{ Object.assign(GS,{period:"latest",src:"auto",set:"",domain:"",owner:"",act:"",st:"",cell:""}); buildGoogleFilters(); renderGoogle(); };
   rf.appendChild(document.createElement("label")); rf.appendChild(rb); mount.appendChild(rf);
 }
 function gSyncFilters(){ $$("#filters-google select").forEach(s=>{ s.value=GS[s.dataset.k]||""; }); }
@@ -2202,7 +2250,8 @@ function renderGoogleTodo(items){
   const by=a=>items.filter(it=>it.act===a);
   const ownerCount=list=>{ const c={}; list.forEach(it=>c[it.owner]=(c[it.owner]||0)+1);
     return Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([o,n])=>`<span class="pill own">${esc(o)} ${n}</span>`).join(" "); };
-  const card=(a,extra)=>{ const t=G_TODO[a], list=by(a);
+  const card=(a,extra)=>{ const t=G_TODO[a], all=by(a), list=all.filter(gIsOpen);
+    const nDoing=all.filter(it=>it.st==="対応中").length, nDone=all.length-list.length;
     const priCls=t.pri==="高"?"":(t.pri==="中"?"mid":"low");
     let top="";
     if(a==="check"){
@@ -2212,17 +2261,18 @@ function renderGoogleTodo(items){
         const comp=[...new Set(gr.items.flatMap(it=>it.comp))].slice(0,3);
         const word=gr.word==="設問文" ? (it0.info.question||"").slice(0,28)+"…（設問文）" : gr.word;
         return `<li><b>「${esc(word)}」</b> ${esc(g.src)} ${gPosText(g)}${g.site?"（"+esc(g.site)+"）":""}${it0.b&&it0.b.imp?`・${fmtN(it0.b.imp)}回`:""}
-          <span class="pill own">担当 ${esc(it0.owner)}</span>${gr.items.length>1?` <span class="muted">（${gr.items.length}問）</span>`:""}
+          <span class="pill own">担当 ${esc(it0.owner)}</span>${it0.st?` <span class="pill st ${G_ST_CLS[it0.st]||""}">${esc(it0.st)}</span>`:""}${gr.items.length>1?` <span class="muted">（${gr.items.length}問）</span>`:""}
           ${a==="fix"&&comp.length?`<div class="muted">Claude は代わりに ${comp.map(esc).join("／")} を挙げている</div>`:""}</li>`; }).join("");
       top=top?`<div class="k">効果の大きい順（上位3件）</div><ul class="notes" style="margin:2px 0;padding-left:18px">${top}</ul>`:"";
     }
     return `<div class="act">
       <div class="hd"><span class="pill pri ${priCls}">${esc(t.pri)}</span> ${esc(t.title)}（${list.length}問）</div>
+      ${nDoing||nDone?`<div class="muted">うち対応中 ${nDoing} 問／完了・見送りで除外 ${nDone} 問</div>`:""}
       <div class="muted">${esc(t.why)}</div>
       ${list.length?top:`<div class="k">該当なし</div>`}
       <div class="k">やること</div><ul class="notes" style="margin:2px 0;padding-left:18px">${t.todo.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
       ${extra||""}
-      ${list.length?`<button class="noprint" style="margin-top:6px" onclick="gFocus({act:'${a}'})">この ${list.length} 問を一覧で見る</button>`:""}
+      ${list.length?`<button class="noprint" style="margin-top:6px" onclick="gFocus({act:'${a}',st:''})">この ${all.length} 問を一覧で見る</button>`:""}
     </div>`; };
   const nRank=by("rank").length;
   $("#g-todo").innerHTML = card("fix") + card("near", nRank?`<div class="muted" style="margin-top:6px">21位以下の ${nRank} 問は一覧の「順位を上げる」で確認できます。</div>`:"") + card("check");
@@ -2230,13 +2280,16 @@ function renderGoogleTodo(items){
 function renderGoogleOwners(items){
   const owners=G_OWNERS().filter(o=>items.some(it=>it.owner===o));
   const acts=G_ACT_ORDER;
-  const cnt={}; items.forEach(it=>{ if(!it.act) return; const k=it.owner+"|"+it.act; cnt[k]=(cnt[k]||0)+1; });
+  const cnt={}, doing={}; items.forEach(it=>{ if(!it.act || !gIsOpen(it)) return; const k=it.owner+"|"+it.act;
+    cnt[k]=(cnt[k]||0)+1; if(it.st==="対応中") doing[k]=(doing[k]||0)+1; });
   $("#g-owner").innerHTML = !owners.length ? nodata("該当する設問がありません") :
     `<table class="gquad"><tr><th>担当</th>${acts.map(a=>`<th>${esc(G_ACTIONS[a].label)}</th>`).join("")}</tr>`
     + owners.map(o=>`<tr><th>${esc(o)}</th>${acts.map(a=>{ const n=cnt[o+"|"+a]||0;
-        return n ? `<td class="qc ${G_ACTIONS[a].cls}" onclick="gFocus({owner:'${escAttr(o)}',act:'${a}'})"><div class="n" style="font-size:18px">${n}</div></td>`
+        const d=doing[o+"|"+a]||0;
+        return n ? `<td class="qc ${G_ACTIONS[a].cls}" onclick="gFocus({owner:'${escAttr(o)}',act:'${a}',st:''})"><div class="n" style="font-size:18px">${n}</div>${d?`<div class="ds">うち対応中 ${d}</div>`:""}</td>`
                  : `<td class="muted">–</td>`; }).join("")}</tr>`).join("")
-    + `</table><div class="muted" style="margin-top:6px">数字をクリックすると、その担当・やることの設問だけに一覧を絞り込みます。担当は config.json の domain_owner（ホームと同じ）。</div>`;
+    + `</table><div class="muted" style="margin-top:6px">数字＝まだ終わっていない設問（施策管理表で「完了」「見送り」の設問は数えません）。クリックで一覧を絞り込みます。`
+    + `担当は施策管理表の「担当（事業）」、空欄なら config.json の domain_owner（ホームと同じ）。</div>`;
 }
 function renderGoogle(){
   const {items,sp,win,cm}=gItems(GS);
@@ -2250,6 +2303,8 @@ function renderGoogle(){
     ? `Google参考値${help("gsc")}：<b>GSC データなし</b>。GSC の Excel を ${esc(G.dir||"gsc_dir（未設定）")} に置いて再生成してください。${warn}`
     : `次にやること：<b>AI向けに直す ${act.fix||0} 問</b>${fixOwners?`（担当 ${fixOwners}）`:""}、`
       +`あと一歩 ${act.near||0} 問、順位を上げる ${act.rank||0} 問、検索チェック待ち ${act.check||0} 問（維持 ${act.keep||0} 問）。`
+      +`<br>施策管理表：対応中 <b>${items.filter(it=>it.st==="対応中").length}</b> 問／完了 ${items.filter(it=>it.st==="完了").length} 問`
+      +`／見送り ${items.filter(it=>it.st==="見送り").length} 問 <span class="muted">（${G_ACT.mtime?`最終更新 ${esc(G_ACT.mtime)}`:"未作成"}・記入方法は下の「施策の記録の仕方」）</span>`
       +`<br><span class="muted">判定に使う Google の値：${esc(G_SRC[GS.src])} ／ 検索チェック：${cm?`${esc(cm)}（${ckSt.done} 件記録）`:"記録なし"}`
       +` ／ GSC${help("gsc")}：${gPeriodText(sp)||"–"} ／ Claude：${esc(win.label)}（有効行で集計）</span>${warn}`;
 
@@ -2272,12 +2327,12 @@ function renderGoogle(){
     const ma=a.b?(a.b.imp||0):-1, mb=b.b?(b.b.imp||0):-1;
     const pa=a.g&&!a.g.out&&a.g.pos!=null?a.g.pos:999, pb=b.g&&!b.g.out&&b.g.pos!=null?b.g.pos:999;
     return ma!==mb ? mb-ma : (pa!==pb ? pa-pb : (a.q<b.q?-1:1)); });
-  const filt=[GS.owner&&`担当 ${GS.owner}`, GS.act&&G_ACTIONS[GS.act].label, GS.cell&&`根拠のマス「${G_CELLS[GS.cell].label}（${G_CELLS[GS.cell].desc}）」`].filter(Boolean);
+  const filt=[GS.owner&&`担当 ${GS.owner}`, GS.act&&G_ACTIONS[GS.act].label, GS.st&&`施策 ${GS.st}`, GS.cell&&`根拠のマス「${G_CELLS[GS.cell].label}（${G_CELLS[GS.cell].desc}）」`].filter(Boolean);
   $("#g-table-head").innerHTML = filt.length
-    ? `絞り込み中：<b>${filt.map(esc).join(" ／ ")}</b>（${list.length} 問） <button class="reset" onclick="gFocus({owner:'',act:'',cell:''})">解除</button>`
+    ? `絞り込み中：<b>${filt.map(esc).join(" ／ ")}</b>（${list.length} 問） <button class="reset" onclick="gFocus({owner:'',act:'',st:'',cell:''})">解除</button>`
     : `${list.length} 問`;
   $("#g-table").innerHTML = !list.length ? nodata("該当する設問がありません") :
-    `<table><tr><th>やること</th><th>設問</th><th>担当</th><th>Claude</th><th>次の一手</th>
+    `<table><tr><th>やること</th><th>設問</th><th>担当</th><th>施策</th><th>Claude</th><th>次の一手</th>
       <th>Claude が代わりに挙げた会社<span class="help" tabindex="0" data-tip="${escAttr("当社が出なかった回答から自動で抜き出した社名の候補（上位3件）。課題解決型（A2）と自社について聞く設問（A6・Set2 の D1）には表示しません。一般語が混ざることがあるため、詳細は回答全文で確認してください。")}">?</span></th>
       <th>Google 順位<div class="muted" style="font-weight:400">判定に使った値</div></th>
       <th>検索チェック${cm?`（${esc(cm)}）`:""}<div class="muted" style="font-weight:400">キーワード ／ 設問文</div></th>
@@ -2298,6 +2353,7 @@ function renderGoogle(){
       return `<tr class="click" onclick="gDetail('${escAttr(it.q)}')"><td>${judge}</td>
         <td>${esc(it.info.question||"")}<div class="muted">${esc(it.q)} ${setTag}${tier} ${esc(it.info.domain_label||"")}</div></td>
         <td class="nw">${esc(it.owner)}</td>
+        <td class="nw">${gStPill(it)}</td>
         <td class="num">${it.claude?`${it.claude.rate}%<div class="muted">${it.claude.h}/${it.claude.n}</div>`:"–"}</td>
         <td style="min-width:220px">${gNext(it)}</td>
         <td>${it.comp.length?it.comp.map(c=>`<span class="pill bad">${esc(c)}</span>`).join(" "):`<span class="muted">–</span>`}</td>
@@ -2309,6 +2365,7 @@ function renderGoogle(){
     + `⚠＝観測キーワードで設問から落ちた要素あり ／ ≈＝GSC参照クエリが観測キーワードより広い（近い語で代用）。行クリックで詳細。</div>`;
   renderGoogleAI();
   renderGoogleAICheck(cm);
+  renderGoogleActHowto();
   renderGoogleLog();
 }
 function gCheckDetail(q){
@@ -2339,6 +2396,7 @@ function gDetail(q){
   const months=[...new Set(Object.keys(cm).concat(monthsG))].sort();
   const posOf=m=>{ const x=byP[m]; if(!x) return null; const v=Object.values(x).sort((a,b)=>(b[1]||0)-(a[1]||0))[0]; return v?v[2]:null; };
   const notes=arr(G.action_notes).filter(n=>arr(n.qids).includes(q));
+  const arows=(G_ACT.by_q[q]||[]);
   const canChart=monthsG.length>=1 && months.length>=2;
   openModal(`<h3>${esc(info.question||q)}</h3>
     <div class="meta">${esc(q)} ／ ${esc(info.domain_label||"")}</div>
@@ -2355,9 +2413,14 @@ function gDetail(q){
     <table style="margin-top:8px"><tr><th>月</th><th>Claude 出現率</th><th>Google 平均順位</th></tr>
       ${months.map(m=>`<tr><td>${m}</td><td class="num">${cm[m]?`${Math.round(cm[m].h/cm[m].n*1000)/10}%（${cm[m].h}/${cm[m].n}）`:"–"}</td>
         <td class="num">${monthsG.includes(m)?(posOf(m)!=null?fmtPos(posOf(m)):"データなし"):"–"}</td></tr>`).join("")}</table>
-    <h3 style="margin-top:14px">施策の記録（config.json の action_notes）</h3>
-    ${notes.length?`<ul class="notes">${notes.map(n=>`<li><b>${esc(n.date)}</b> ${esc(n.note)}</li>`).join("")}</ul>`
-      :`<div class="muted">記録なし</div>`}`);
+    <h3 style="margin-top:14px">施策の記録（施策管理表）</h3>
+    ${arows.length?`<table><tr><th>状態</th><th>担当</th><th>期限</th><th>実施日</th><th>実施内容</th><th>対象ページ</th><th>メモ</th></tr>`
+      + arows.map(r=>`<tr><td class="nw">${r.status?`<span class="pill st ${G_ST_CLS[r.status]||""}">${esc(r.status)}</span>`:"–"}</td>
+        <td>${esc(r.owner)}${r.person?`<div class="muted">${esc(r.person)}</div>`:""}</td><td class="nw">${esc(r.due)}</td><td class="nw">${esc(r.done)}</td>
+        <td>${esc(r.content)}</td><td style="word-break:break-all">${r.url?`<a href="${escAttr(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>`:""}</td>
+        <td>${esc(r.memo)}<div class="muted">${esc(r.row)}行目</div></td></tr>`).join("") + `</table>`
+      : `<div class="muted">記入なし（${esc(G_ACT.file||"施策管理表")} の、この設問ID の行に記入すると表示されます）</div>`}
+    ${notes.length?`<ul class="notes">${notes.map(n=>`<li><b>${esc(n.date)}</b> ${esc(n.note)} <span class="muted">（config.json の action_notes）</span></li>`).join("")}</ul>`:""}`);
   if(gDetailChart){ gDetailChart.destroy(); gDetailChart=null; }
   if(canChart){
     gDetailChart=new Chart($("#chart-g-detail"),{type:"line",
@@ -2415,6 +2478,17 @@ function renderGoogleAICheck(cm){
     + (st.aio_hosts.length?`<table><tr><th>よく引用されているサイト</th><th>回数</th></tr>${st.aio_hosts.map(([h,n])=>`<tr><td>${esc(h)}${OWN_DOMAINS_G.some(d=>h===d||h.endsWith("."+d))?' <span class="pill own">自社</span>':""}</td><td class="num">${n}</td></tr>`).join("")}</table>`:"");
 }
 const OWN_DOMAINS_G = Object.values(G.sites||{}).map(s=>s.domain).filter(Boolean);
+function renderGoogleActHowto(){
+  $("#g-act-body").innerHTML = `施策の担当者・状態・実施内容は、Box の Excel <b>${esc(G_ACT.file||"（未設定）")}</b> に記入します
+    ${G_ACT.mtime?`（最終更新 ${esc(G_ACT.mtime)}・記入 ${G_ACT.rows.length} 行）`:"（まだありません）"}。
+    <ol style="margin:6px 0;padding-left:20px">
+      <li>Excel を開き、該当する<b>設問ID</b>の行に「担当者」「状態（未着手／対応中／完了／見送り）」「期限」「実施日」「実施内容」「対象ページURL」を書いて保存する。</li>
+      <li>同じ設問で次の施策をしたら、<b>行を追加</b>して同じ設問IDを書く（下の行ほど新しい記録として扱います）。</li>
+      <li>「担当（事業）」を書き換えると、この画面の担当もその設問だけ変わります。</li>
+      <li>保存すると、分析ダッシュボードの自動更新（毎日14:30〜23:30の1時間おき）か、定点観測 GUI の「分析ダッシュボードを開く」で、全員の画面に反映されます。</li>
+    </ol>
+    同じファイルを2人が同時に編集すると、Box 上で競合コピーができることがあります。編集は1人ずつ、保存したら閉じてください。`;
+}
 function renderGoogleLog(){
   $("#g-log").innerHTML = `<div>GSC フォルダ：${esc(G.dir||"未設定")}</div>`
     + arr(G.warnings).map(w=>`<div>⚠ ${esc(w)}</div>`).join("")
@@ -2431,7 +2505,8 @@ function renderHomeGoogle(){ // ホーム「1) 今回の結論」の末尾に1�
     const {items,sp}=gItems({period:"latest",set:"",domain:"",owner:""}), c=gCounts(items,"act");
     body=`<b>Google参考値</b>${help("gsc")}：次にやること　<b>AI向けに直す ${c.fix||0} 問</b>`
       +`（Google 10位以内なのに Claude で出ていない）／あと一歩 ${c.near||0} 問／順位を上げる ${c.rank||0} 問／`
-      +`検索チェック待ち ${c.check||0} 問 <span class="muted">（${gPeriodText(sp)}）</span>`;
+      +`検索チェック待ち ${c.check||0} 問 ／ 施策 対応中 ${items.filter(it=>it.st==="対応中").length} 問・完了 ${items.filter(it=>it.st==="完了").length} 問`
+      +` <span class="muted">（${gPeriodText(sp)}）</span>`;
   }
   el.insertAdjacentHTML("beforeend", `<div class="set-box">${body}
     <button class="noprint" style="margin-left:8px" onclick="showTab('s-google')">Google参考値タブへ</button></div>`);
