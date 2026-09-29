@@ -1025,19 +1025,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <section id="s-google">
     <div class="summary" id="g-summary"></div>
     <details class="howto"><summary>この画面の見方</summary>
-      <div class="body">Claude の出現と<b>同じ設問</b>について、Google 自然検索での自社サイトの順位（GSC＝Google Search Console）を<b>参考値</b>として並べます。
-        <b>①4象限</b>＝縦が Claude の出現（出現率が0%より大きいか）、横が Google の順位（10位以内＝1ページ目か）。
-        「<b>GEO優先</b>」＝Google では上位に出ているのに Claude には出ていない設問（ウェブに情報はあるが AI に届いていない）です。
-        <b>②設問一覧</b>＝行をクリックすると、期間ごとの値と推移が開きます。<b>③AI Overview</b>＝GSC「生成AI機能」レポートの表示回数。
+      <div class="body">Claude の出現と<b>同じ設問</b>について、Google 自然検索での自社サイトの順位（GSC＝Google Search Console）を<b>参考値</b>として並べ、
+        <b>担当ごとに次にやること</b>を出します。見る順番：<b>①次にやること</b>（優先度の高い打ち手と、効果の大きい設問）→ <b>②担当別</b>（自分の担当の件数）→
+        <b>③設問一覧</b>（設問ごとの「次の一手」。行クリックで期間ごとの値と推移）。<b>④判定の根拠</b>は、Claude の出現（出現率が0%より大きいか）×
+        Google の順位（10位以内か）のマス目です。
+        <br>やることの決め方：Claude で出現 →「維持」／Claude で出ない かつ Google 10位以内 →「<b>AI向けに直す</b>」（ページはあるので AI に届く形に直す）／
+        11〜20位 →「あと一歩」／21位以下 →「順位を上げる」／GSC にデータなし →「検索チェック待ち」。
         <br>※ GSC は<b>自社サイトのみ</b>・<b>表示されたときの平均順位</b>です。1設問に1つの「GSC参照クエリ」（実際に検索されている近い語）で照合しており、
         観測キーワードとずれる場合は「≈」を付けています。GSC に出てこない語は<b>データなし</b>（検索されていない／自社が出ていない／上位1,000件の外）で、0位ではありません。</div>
     </details>
     <div class="filters" id="filters-google"></div>
-    <div class="card"><h3>① 4象限（設問数 ／ クリックで一覧を絞り込み）</h3><div id="g-quad"></div>
-      <div class="muted" id="g-quad-note" style="margin-top:8px"></div></div>
-    <h2>② 設問一覧</h2>
+    <h2>① 次にやること</h2>
+    <div class="acts" id="g-todo"></div>
+    <h2>② 担当別のやること（数字をクリックで一覧を絞り込み）</h2>
+    <div class="card xtab" id="g-owner"></div>
+    <h2>③ 設問一覧 <span class="muted" style="font-weight:400" id="g-table-head"></span></h2>
     <div class="card xtab"><div id="g-table"></div></div>
-    <h2>③ AI Overview（GSC 生成AI機能：自社ページが表示された回数）</h2>
+    <h2>④ 判定の根拠（Claude の出現 × Google の順位）</h2>
+    <div class="card"><div id="g-quad"></div>
+      <div class="muted" id="g-quad-note" style="margin-top:8px"></div></div>
+    <h2>⑤ AI Overview（GSC 生成AI機能：自社ページが表示された回数）</h2>
     <div class="grid g2">
       <div class="card"><h3>日別の表示回数</h3><div class="filters" id="g-ai-filters" style="margin:0 0 10px;padding:8px 10px"></div>
         <div class="bar-wrap" style="max-height:320px"><canvas id="chart-g-ai" height="280"></canvas></div></div>
@@ -1979,21 +1986,50 @@ FSTATE.compare = {gran:"run"};
 // ─────────────────────────────────────────── Google参考値（GSC）
 const G = Object.assign({available:false,periods:[],keywords:{},ref:{},daily:{},ai_pages:{},log:[],warnings:[],
   sites:{},action_notes:[]}, DATA.google||{});
-const GS = {period:"latest", set:"", domain:"", cell:"", aiSite:"", aiPeriod:""};
+const GS = {period:"latest", set:"", domain:"", owner:"", act:"", cell:"", aiSite:"", aiPeriod:""};
 const G_SEARCH_PERIODS = arr(G.periods).filter(p=>arr(p.sites).length);
 const G_SITE_ORDER = Object.keys(G.sites||{});
 const siteLabel = s => ((G.sites||{})[s]||{}).label || s;
 const byEndDesc = (a,b) => a.end<b.end?1:(a.end>b.end?-1:0);
 HELP.gsc = "GSC（Google Search Console）＝自社サイトが Google 検索でどう表示されたかの公式データ。自社サイトのみ・表示されたときの平均順位で、競合は見えません。毎月、前月1日〜末日で書き出したファイルを置くと月次で比較できます。";
-const G_CELLS = {
-  "hit|top": {label:"両方強い",    cls:"q-both", desc:"維持"},
-  "hit|low": {label:"AIでは強い",  cls:"q-ai",   desc:"SEO の基本を整える"},
-  "hit|none":{label:"AIでは出現",  cls:"q-ai",   desc:"Google はデータなし"},
-  "miss|top":{label:"GEO優先 ★",  cls:"q-geo",  desc:"ウェブにはあるが AI に届いていない"},
-  "miss|low":{label:"両方弱い",    cls:"q-weak", desc:"コンテンツを作る・強化する"},
-  "miss|none":{label:"判定保留",   cls:"q-none", desc:"Google データなし（検索チェック待ち）"},
+// やること：Claude の出現 × Google の順位 → 担当が次にやること
+const G_ACTIONS = {
+  fix:  {label:"AI向けに直す",           cls:"q-geo",  pri:"高", desc:"Google は10位以内なのに Claude に出ない"},
+  near: {label:"あと一歩（11〜20位）",    cls:"q-weak", pri:"中", desc:"もう少しで Google の1ページ目"},
+  rank: {label:"順位を上げる（21位〜）",  cls:"q-weak", pri:"中", desc:"Google でも AI でも弱い"},
+  check:{label:"検索チェック待ち",        cls:"q-none", pri:"–",  desc:"GSC にデータがない"},
+  keep: {label:"維持",                   cls:"q-both", pri:"–",  desc:"Claude で出現している"},
 };
-const G_ORDER = ["miss|top","miss|low","hit|low","hit|top","hit|none","miss|none"];
+const G_ACT_ORDER = ["fix","near","rank","check","keep"];
+function gAction(cy,b){
+  if(!cy) return "";
+  if(cy==="hit") return "keep";
+  if(!b || b.pos==null) return "check";
+  return b.pos<=10 ? "fix" : (b.pos<=20 ? "near" : "rank");
+}
+// 判定の根拠（4象限のマス目）：縦＝Claude、横＝Google
+const G_CELLS = {
+  "hit|top": {label:"維持",               cls:"q-both", desc:"両方で出ている"},
+  "hit|low": {label:"維持",               cls:"q-both", desc:"Google は伸ばせる"},
+  "hit|none":{label:"維持",               cls:"q-both", desc:"Google は未確認"},
+  "miss|top":{label:"AI向けに直す",        cls:"q-geo",  desc:"ページはあるが AI に届いていない"},
+  "miss|low":{label:"あと一歩／順位を上げる",cls:"q-weak", desc:"Google でも弱い"},
+  "miss|none":{label:"検索チェック待ち",    cls:"q-none", desc:"Google データなし"},
+};
+const G_TODO = {
+  fix:{title:"1. AI向けにページを直す", pri:"高",
+    why:"Google では10位以内に自社ページがあるのに、Claude には出てこない設問です。ページはすでにあるので、AI が引用しやすい形に直すのが近道です。",
+    todo:["本文に社名・ブランド名（オンワードコーポレートデザイン、ラフィーリア等）を明記する",
+          "導入実績・顧客名を具体的に書く","FAQ・比較表など、質問に直接答える形にする",
+          "外部メディア・業界サイトでの言及を増やす（プレスリリース・寄稿・事例掲載）"]},
+  near:{title:"2. あと一歩で Google の1ページ目", pri:"中",
+    why:"Google で11〜20位の設問です。少しの改善で1ページ目に入り、AI にも届きやすくなります。",
+    todo:["タイトル・見出しにこの語を入れる","関連ページから内部リンクを張る","情報を最新にし、事例を追加する"]},
+  check:{title:"3. Google でも確認できていない設問", pri:"次の作業",
+    why:"GSC にデータがない設問です（検索されていない、または自社が上位1,000件に入っていない）。実際の検索結果を確認します。",
+    todo:["毎月の検索チェック（ブックマークレット）で、設問文と観測キーワードを Google で確認する",
+          "確認して自社が出ない語は、新しいページ（事例・解説）の候補にする"]},
+};
 const fmtN = v => v==null ? "–" : Number(v).toLocaleString("ja-JP");
 const fmtPos = v => v==null ? "–" : (Math.round(v*10)/10).toFixed(1)+"位";
 
@@ -2021,19 +2057,23 @@ function gClaudeWindow(sel){
   return p ? {start:p.start,end:p.end,label:`${p.key}（Google と同じ月）`}
            : {start:"",end:"",label:"全期間（Google 側が月単位のファイルでないため）"};
 }
-function gClaudeStats(win){
+function gClaudeStats(win){ // qid -> {n, h, comp:{社名:回数}}（有効行・期間内）
   const m={};
   ROWS.forEach(r=>{ if(!isValid(r)) return;
     if(win.start && (r.date<win.start || r.date>win.end)) return;
-    const o=m[r.qid]||(m[r.qid]={n:0,h:0}); o.n++; if(r.hit) o.h++; });
+    const o=m[r.qid]||(m[r.qid]={n:0,h:0,comp:{}}); o.n++; if(r.hit) o.h++;
+    arr(r.comp).forEach(c=>{ o.comp[c]=(o.comp[c]||0)+1; }); });
   return m;
 }
 const G_QINFO = (()=>{ const m={};
   Object.entries(G.keywords||{}).forEach(([q,k])=>{ m[q]={qid:q,question:k.q||"",set:String(k.set||"").toLowerCase(),
     domain:"",domain_label:k.domain_label||"",tier:""}; });
   ROWS.forEach(r=>{ m[r.qid]={qid:r.qid,question:r.question,set:r.set,domain:r.domain,
-    domain_label:r.domain_label,tier:r.tier}; });
+    domain_label:r.domain_label,tier:r.tier,type:r.type}; });
   return m; })();
+// 「代わりに挙げた会社」を出す設問か。課題解決型（A2）は回答の太字が施策名になりノイズになるため、
+// 自社について聞く設問（A6・Set2 の D1）は競合比較の対象でないため、表示しない
+const gAsksCompany = info => !["A2","A6"].includes(info.type) && info.tier!=="D1";
 function gRef(k, sp){ // GSC参照クエリの値（代表＝表示回数が最大のサイト）
   if(!k || !k.refn) return {best:null,all:[]};
   const byP=(G.ref||{})[k.refn]||{}, list=[];
@@ -2044,52 +2084,122 @@ function gRef(k, sp){ // GSC参照クエリの値（代表＝表示回数が最�
 }
 function gItems(opt){
   const sp=gSitePeriods(opt.period), win=gClaudeWindow(opt.period), cs=gClaudeStats(win);
-  const items=Object.keys(G_QINFO).sort().filter(q=>{
-    const info=G_QINFO[q];
-    return (!opt.set || info.set===opt.set) && (!opt.domain || info.domain===opt.domain);
-  }).map(q=>{
+  const items=Object.keys(G_QINFO).sort().map(q=>{
     const info=G_QINFO[q], k=(G.keywords||{})[q]||null, c=cs[q];
     const claude=c?{n:c.n,h:c.h,rate:Math.round(c.h/c.n*1000)/10}:null;
+    const comp=(c && gAsksCompany(info))?Object.entries(c.comp).sort((a,b)=>b[1]-a[1]).slice(0,3).map(x=>x[0]):[];
     const ref=gRef(k,sp), b=ref.best;
     const gy=!b?"none":(b.pos!=null && b.pos<=10?"top":"low");
     const cy=claude?(claude.h>0?"hit":"miss"):"";
-    return {q,info,k,claude,ref,b,gy,cy,cell:cy?`${cy}|${gy}`:""};
-  });
+    return {q,info,k,claude,comp,ref,b,gy,cy,cell:cy?`${cy}|${gy}`:"",act:gAction(cy,b),
+            owner:ownerOf(info.domain_label)};
+  }).filter(it=>(!opt.set || it.info.set===opt.set) && (!opt.domain || it.info.domain===opt.domain)
+            && (!opt.owner || it.owner===opt.owner));
   return {items,sp,win};
 }
-function gCounts(items){ const c={}; items.forEach(it=>{ if(it.cell) c[it.cell]=(c[it.cell]||0)+1; }); return c; }
+function gCounts(items,key){ const c={}; items.forEach(it=>{ const v=it[key||"cell"]; if(v) c[v]=(c[v]||0)+1; }); return c; }
 function gPeriodText(sp){
   const byKey={};
   Object.entries(sp).forEach(([s,p])=>{ (byKey[p.key]||(byKey[p.key]={p,sites:[]})).sites.push(s); });
   return Object.values(byKey).map(x=>`${x.sites.join("・")}：${esc(x.p.monthly?x.p.key:x.p.label)}`).join("／");
 }
+function gNext(it){ // 設問ごとの「次の一手」
+  const k=it.k||{}, b=it.b, w=esc(k.ref||k.obs||"");
+  switch(it.act){
+    case "fix":  return `「${w}」で ${fmtPos(b.pos)}（${esc(b.site)}）のページに、社名・ブランド名、導入実績（具体名）、FAQ・比較表を追記する`;
+    case "near": return `「${w}」は ${fmtPos(b.pos)}。タイトル・見出しにこの語を入れ、関連ページから内部リンクを張って10位以内を目指す`;
+    case "rank": return `「${w}」は ${fmtPos(b.pos)}。この語に答えるページ（事例・解説）を強化するか、新しく作る`;
+    case "check":return k.obs ? `検索チェックで「${esc(k.obs)}」と設問文を Google で確認する`
+                              : `キーワード未設定（google_keywords.csv に追加する）`;
+    case "keep": return b ? `維持（Google ${fmtPos(b.pos)}）` : `維持（Google は未確認）`;
+  }
+  return `<span class="muted">Claude の有効な回答がありません</span>`;
+}
+const G_OWNERS = () => { const o=[...new Set(Object.values(HOME.domain_owner||{}))]; if(!o.includes("未割当")) o.push("未割当"); return o; };
 function buildGoogleFilters(){
   const mount=$("#filters-google"); mount.innerHTML="";
   const mk=(label,key,opts)=>{ const f=document.createElement("div"); f.className="f";
     const lab=document.createElement("label"); lab.textContent=label;
     const sel=document.createElement("select");
     sel.innerHTML=opts.map(([v,t])=>`<option value="${escAttr(v)}">${esc(t)}</option>`).join("");
-    sel.value=GS[key]; sel.onchange=()=>{ GS[key]=sel.value; GS.cell=""; renderGoogle(); };
+    sel.value=GS[key]; sel.dataset.k=key; sel.onchange=()=>{ GS[key]=sel.value; GS.cell=""; renderGoogle(); };
     f.appendChild(lab); f.appendChild(sel); mount.appendChild(f); };
   mk("Google 期間","period",[["latest","最新（サイトごとの最新ファイル）"]]
     .concat(G_SEARCH_PERIODS.map(p=>[p.key,(p.monthly?p.key:p.label)+`（${p.sites.join("・")}）`])));
+  mk("担当","owner",[["","すべて"]].concat(G_OWNERS().map(o=>[o,o])));
+  mk("やること","act",[["","すべて"]].concat(G_ACT_ORDER.map(a=>[a,G_ACTIONS[a].label])));
   mk("質問セット","set",[["","すべて"]].concat(D.sets.map(s=>[s,SET_LABELS[s]||s])));
   mk("ドメイン","domain",[["","すべて"]].concat(D.domains.map(d=>[d,optLabel("domain",d)])));
   const rf=document.createElement("div"); rf.className="f";
   const rb=document.createElement("button"); rb.className="reset"; rb.textContent="リセット";
-  rb.onclick=()=>{ Object.assign(GS,{period:"latest",set:"",domain:"",cell:""}); buildGoogleFilters(); renderGoogle(); };
+  rb.onclick=()=>{ Object.assign(GS,{period:"latest",set:"",domain:"",owner:"",act:"",cell:""}); buildGoogleFilters(); renderGoogle(); };
   rf.appendChild(document.createElement("label")); rf.appendChild(rb); mount.appendChild(rf);
 }
+function gSyncFilters(){ $$("#filters-google select").forEach(s=>{ s.value=GS[s.dataset.k]||""; }); }
+function gFocus(o){ // 担当・やることで一覧を絞り込んで表までスクロール
+  Object.assign(GS,{cell:""},o); gSyncFilters(); renderGoogle();
+  $("#g-table").scrollIntoView({behavior:"smooth",block:"start"});
+}
 function gCell(key){ GS.cell = GS.cell===key ? "" : key; renderGoogle(); }
+function gGroups(list){ // 同じ GSC参照クエリの設問をまとめ、検索の多い順に
+  const g={};
+  list.forEach(it=>{ const key=(it.k&&it.k.refn)||it.q; (g[key]||(g[key]={items:[],b:it.b,k:it.k})).items.push(it); });
+  return Object.values(g).sort((a,b)=>((b.b&&b.b.imp)||0)-((a.b&&a.b.imp)||0));
+}
+function renderGoogleTodo(items){
+  const by=a=>items.filter(it=>it.act===a);
+  const ownerCount=list=>{ const c={}; list.forEach(it=>c[it.owner]=(c[it.owner]||0)+1);
+    return Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([o,n])=>`<span class="pill own">${esc(o)} ${n}</span>`).join(" "); };
+  const card=(a,extra)=>{ const t=G_TODO[a], list=by(a);
+    const priCls=t.pri==="高"?"":(t.pri==="中"?"mid":"low");
+    let top="";
+    if(a==="check"){
+      top=list.length?`<div class="k">担当別</div><div>${ownerCount(list)}</div>`:"";
+    } else {
+      top=gGroups(list).slice(0,3).map(g=>{ const b=g.b, it0=g.items[0];
+        const comp=[...new Set(g.items.flatMap(it=>it.comp))].slice(0,3);
+        return `<li><b>「${esc(g.k.ref)}」</b> ${esc(b.site)} ${fmtPos(b.pos)}・${fmtN(b.imp)}回
+          <span class="pill own">担当 ${esc(it0.owner)}</span>${g.items.length>1?` <span class="muted">（${g.items.length}問）</span>`:""}
+          ${a==="fix"&&comp.length?`<div class="muted">Claude は代わりに ${comp.map(esc).join("／")} を挙げている</div>`:""}</li>`; }).join("");
+      top=top?`<div class="k">検索の多い順（上位3件）</div><ul class="notes" style="margin:2px 0;padding-left:18px">${top}</ul>`:"";
+    }
+    return `<div class="act">
+      <div class="hd"><span class="pill pri ${priCls}">${esc(t.pri)}</span> ${esc(t.title)}（${list.length}問）</div>
+      <div class="muted">${esc(t.why)}</div>
+      ${list.length?top:`<div class="k">該当なし</div>`}
+      <div class="k">やること</div><ul class="notes" style="margin:2px 0;padding-left:18px">${t.todo.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
+      ${extra||""}
+      ${list.length?`<button class="noprint" style="margin-top:6px" onclick="gFocus({act:'${a}'})">この ${list.length} 問を一覧で見る</button>`:""}
+    </div>`; };
+  const nRank=by("rank").length;
+  $("#g-todo").innerHTML = card("fix") + card("near", nRank?`<div class="muted" style="margin-top:6px">21位以下の ${nRank} 問は一覧の「順位を上げる」で確認できます。</div>`:"") + card("check");
+}
+function renderGoogleOwners(items){
+  const owners=G_OWNERS().filter(o=>items.some(it=>it.owner===o));
+  const acts=G_ACT_ORDER;
+  const cnt={}; items.forEach(it=>{ if(!it.act) return; const k=it.owner+"|"+it.act; cnt[k]=(cnt[k]||0)+1; });
+  $("#g-owner").innerHTML = !owners.length ? nodata("該当する設問がありません") :
+    `<table class="gquad"><tr><th>担当</th>${acts.map(a=>`<th>${esc(G_ACTIONS[a].label)}</th>`).join("")}</tr>`
+    + owners.map(o=>`<tr><th>${esc(o)}</th>${acts.map(a=>{ const n=cnt[o+"|"+a]||0;
+        return n ? `<td class="qc ${G_ACTIONS[a].cls}" onclick="gFocus({owner:'${escAttr(o)}',act:'${a}'})"><div class="n" style="font-size:18px">${n}</div></td>`
+                 : `<td class="muted">–</td>`; }).join("")}</tr>`).join("")
+    + `</table><div class="muted" style="margin-top:6px">数字をクリックすると、その担当・やることの設問だけに一覧を絞り込みます。担当は config.json の domain_owner（ホームと同じ）。</div>`;
+}
 function renderGoogle(){
-  const {items,sp,win}=gItems(GS), cnt=gCounts(items);
-  const noClaude=items.filter(it=>!it.cy).length, noG=items.filter(it=>it.gy==="none").length;
+  const {items,sp,win}=gItems(GS);
+  const cnt=gCounts(items), act=gCounts(items,"act");
+  const noClaude=items.filter(it=>!it.cy).length;
   const warn=arr(G.warnings).map(w=>`<div class="muted">⚠ ${esc(w)}</div>`).join("");
+  const fixOwners=(()=>{ const c={}; items.filter(it=>it.act==="fix").forEach(it=>c[it.owner]=(c[it.owner]||0)+1);
+    return Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([o,n])=>`${esc(o)} ${n}`).join("・"); })();
   $("#g-summary").innerHTML = !G.available
     ? `Google参考値${help("gsc")}：<b>GSC データなし</b>。GSC の Excel を ${esc(G.dir||"gsc_dir（未設定）")} に置いて再生成してください。${warn}`
-    : `対象 <b>${items.length}</b> 問のうち、<b>GEO優先 ${cnt["miss|top"]||0} 問</b>（Google 10位以内なのに Claude で出ていない）、`
-      +`両方強い ${cnt["hit|top"]||0} 問、両方弱い ${cnt["miss|low"]||0} 問、Google データなし ${noG} 問。`
+    : `次にやること：<b>AI向けに直す ${act.fix||0} 問</b>${fixOwners?`（担当 ${fixOwners}）`:""}、`
+      +`あと一歩 ${act.near||0} 問、順位を上げる ${act.rank||0} 問、検索チェック待ち ${act.check||0} 問（維持 ${act.keep||0} 問）。`
       +`<br><span class="muted">Google${help("gsc")}：${gPeriodText(sp)||"–"} ／ Claude：${esc(win.label)}（有効行で集計）</span>${warn}`;
+
+  renderGoogleTodo(items);
+  renderGoogleOwners(items);
 
   const cellTd=key=>{ const c=G_CELLS[key];
     return `<td class="qc ${c.cls}${GS.cell===key?" sel":""}" onclick="gCell('${key}')">
@@ -2098,33 +2208,41 @@ function renderGoogle(){
       <th>Google 10位以内</th><th>Google 11位以下</th><th>Google データなし</th></tr>
     <tr><th>Claude 出現あり<div class="muted">（出現率 &gt; 0%）</div></th>${cellTd("hit|top")}${cellTd("hit|low")}${cellTd("hit|none")}</tr>
     <tr><th>Claude 出現なし<div class="muted">（出現率 0%）</div></th>${cellTd("miss|top")}${cellTd("miss|low")}${cellTd("miss|none")}</tr></table>`;
-  $("#g-quad-note").innerHTML = (GS.cell?`「${esc(G_CELLS[GS.cell].label)}」で一覧を絞り込み中（もう一度クリックで解除）。`:"")
-    + (noClaude?` Claude の有効な回答がない設問 ${noClaude} 問は4象限に含めていません。`:"");
+  $("#g-quad-note").innerHTML = (noClaude?`Claude の有効な回答がない設問 ${noClaude} 問は含めていません。`:"")
+    + ` マスをクリックすると一覧を絞り込みます。`;
 
-  const list=items.filter(it=>!GS.cell || it.cell===GS.cell).sort((a,b)=>{
-    const ia=a.cell?G_ORDER.indexOf(a.cell):99, ib=b.cell?G_ORDER.indexOf(b.cell):99;
+  const list=items.filter(it=>(!GS.cell || it.cell===GS.cell) && (!GS.act || it.act===GS.act)).sort((a,b)=>{
+    const ia=a.act?G_ACT_ORDER.indexOf(a.act):99, ib=b.act?G_ACT_ORDER.indexOf(b.act):99;
     if(ia!==ib) return ia-ib;
-    const pa=a.b?a.b.pos:999, pb=b.b?b.b.pos:999;
-    return pa!==pb ? pa-pb : (a.q<b.q?-1:1); });
+    const ma=a.b?(a.b.imp||0):-1, mb=b.b?(b.b.imp||0):-1;
+    return ma!==mb ? mb-ma : (a.q<b.q?-1:1); });
+  const filt=[GS.owner&&`担当 ${GS.owner}`, GS.act&&G_ACTIONS[GS.act].label, GS.cell&&`根拠のマス「${G_CELLS[GS.cell].label}（${G_CELLS[GS.cell].desc}）」`].filter(Boolean);
+  $("#g-table-head").innerHTML = filt.length
+    ? `絞り込み中：<b>${filt.map(esc).join(" ／ ")}</b>（${list.length} 問） <button class="reset" onclick="gFocus({owner:'',act:'',cell:''})">解除</button>`
+    : `${list.length} 問`;
   $("#g-table").innerHTML = !list.length ? nodata("該当する設問がありません") :
-    `<table><tr><th>判定</th><th>設問</th><th>Claude</th><th>観測キーワード</th><th>GSC参照クエリ</th>
-      <th>サイト</th><th>平均順位</th><th>表示回数</th><th>クリック</th></tr>`
-    + list.map(it=>{ const c=it.cell?G_CELLS[it.cell]:null, k=it.k||{}, b=it.b;
-      const judge=c?`<span class="judge ${c.cls}">${esc(c.label)}</span>`:`<span class="muted">Claude 未計測</span>`;
+    `<table><tr><th>やること</th><th>設問</th><th>担当</th><th>Claude</th><th>次の一手</th>
+      <th>Claude が代わりに挙げた会社<span class="help" tabindex="0" data-tip="${escAttr("当社が出なかった回答から自動で抜き出した社名の候補（上位3件）。課題解決型（A2）と自社について聞く設問（A6・Set2 の D1）には表示しません。一般語が混ざることがあるため、詳細は回答全文で確認してください。")}">?</span></th>
+      <th>観測キーワード</th><th>GSC参照クエリ</th><th>Google 順位</th><th>表示回数</th></tr>`
+    + list.map(it=>{ const A=it.act?G_ACTIONS[it.act]:null, k=it.k||{}, b=it.b;
+      const judge=A?`<span class="judge ${A.cls}">${esc(A.label)}</span>`:`<span class="muted">Claude 未計測</span>`;
       const setTag=it.info.set?`<span class="pill">${esc(it.info.set.replace(/^set/,"Set"))}</span>`:"";
       const tier=it.info.tier?`<span class="pill">${esc(it.info.tier)}</span>`:"";
       const obs=k.obs?esc(k.obs)+(k.gap?` <span class="gap" title="${escAttr("意図のズレ："+k.gap)}">⚠</span>`:""):`<span class="muted">未設定</span>`;
       const ref=k.ref?((k.refdiff && k.refdiff!=="同一")?`<span class="approx" title="${escAttr(k.refdiff)}">≈</span> `:"")+esc(k.ref)
                      :`<span class="muted">なし</span>`;
-      const more=it.ref.all.length>1?` <span class="muted">+${it.ref.all.length-1}</span>`:"";
+      const more=it.ref.all.length>1?` +${it.ref.all.length-1}`:"";
       return `<tr class="click" onclick="gDetail('${escAttr(it.q)}')"><td>${judge}</td>
         <td>${esc(it.info.question||"")}<div class="muted">${esc(it.q)} ${setTag}${tier} ${esc(it.info.domain_label||"")}</div></td>
+        <td class="nw">${esc(it.owner)}</td>
         <td class="num">${it.claude?`${it.claude.rate}%<div class="muted">${it.claude.h}/${it.claude.n}</div>`:"–"}</td>
+        <td style="min-width:220px">${gNext(it)}</td>
+        <td>${it.comp.length?it.comp.map(c=>`<span class="pill bad">${esc(c)}</span>`).join(" "):`<span class="muted">–</span>`}</td>
         <td>${obs}</td><td>${ref}</td>
-        <td>${b?esc(b.site)+more:"–"}</td>
-        <td class="num">${b?fmtPos(b.pos):`<span class="muted">データなし</span>`}</td>
-        <td class="num">${b?fmtN(b.imp):"–"}</td><td class="num">${b?fmtN(b.clk):"–"}</td></tr>`; }).join("")
-    + `</table><div class="muted" style="margin-top:6px">⚠＝観測キーワードで設問から落ちた要素あり ／ ≈＝GSC参照クエリが観測キーワードより広い（近い語で代用）。記号にマウスを乗せると内容が出ます。行クリックで詳細。</div>`;
+        <td class="num">${b?`${fmtPos(b.pos)}<div class="muted">${esc(b.site)}${more}</div>`:`<span class="muted">データなし</span>`}</td>
+        <td class="num">${b?fmtN(b.imp):"–"}</td></tr>`; }).join("")
+    + `</table><div class="muted" style="margin-top:6px">並び順：やることの優先度 → Google で検索されている回数（表示回数）が多い順。`
+    + `⚠＝観測キーワードで設問から落ちた要素あり ／ ≈＝GSC参照クエリが観測キーワードより広い（近い語で代用）。行クリックで詳細。</div>`;
   renderGoogleAI();
   renderGoogleLog();
 }
@@ -2222,11 +2340,10 @@ function renderHomeGoogle(){ // ホーム「1) 今回の結論」の末尾に1�
   let body;
   if(!G.available) body=`<b>Google参考値</b>${help("gsc")}：<b>データなし</b>（GSC ファイル未取り込み）`;
   else {
-    const {items,sp}=gItems({period:"latest",set:"",domain:""}), c=gCounts(items);
-    const noG=items.filter(it=>it.gy==="none").length;
-    body=`<b>Google参考値</b>${help("gsc")}：<b>GEO優先 ${c["miss|top"]||0} 問</b>`
-      +`（Google 10位以内なのに Claude で出ていない）／両方強い ${c["hit|top"]||0} 問／両方弱い ${c["miss|low"]||0} 問／`
-      +`Google データなし ${noG} 問 <span class="muted">（${gPeriodText(sp)}）</span>`;
+    const {items,sp}=gItems({period:"latest",set:"",domain:"",owner:""}), c=gCounts(items,"act");
+    body=`<b>Google参考値</b>${help("gsc")}：次にやること　<b>AI向けに直す ${c.fix||0} 問</b>`
+      +`（Google 10位以内なのに Claude で出ていない）／あと一歩 ${c.near||0} 問／順位を上げる ${c.rank||0} 問／`
+      +`検索チェック待ち ${c.check||0} 問 <span class="muted">（${gPeriodText(sp)}）</span>`;
   }
   el.insertAdjacentHTML("beforeend", `<div class="set-box">${body}
     <button class="noprint" style="margin-left:8px" onclick="showTab('s-google')">Google参考値タブへ</button></div>`);
