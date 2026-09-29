@@ -49,6 +49,7 @@ python generate.py --results-dir "C:\Users\612316\Documents\GitHub\GEO\monitorin
 
 **Google参考値タブ**：毎月、GSC の Excel（6 サイト × 検索パフォーマンス／生成AI機能）を `config.json` の `gsc_dir` に置くと、
 Claude の出現と Google 自然検索の順位を同じ設問で並べて表示します（手順は `docs/実行手順書_v1.md` の D-2）。
+施策の担当者・状態・実施内容は Box の `GEO-analysis\Google参考値_施策管理.xlsx` に関係者が記入し、保存すると次の更新で全員の画面に反映されます（D-3）。
 
 生成された `analysis.html` をブラウザで開くだけで動きます（外部依存は CDN の Chart.js のみ）。
 CSV を再測定・追加したら `python generate.py` を再実行すれば最新データで更新されます。

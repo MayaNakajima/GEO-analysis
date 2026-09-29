@@ -428,3 +428,67 @@ def load_checks(check_dir, keywords):
         st["aio_hosts"] = sorted(st["aio_hosts"].items(), key=lambda x: -x[1])[:15]
     return {"months": sorted(by_month, reverse=True), "by_month": by_month, "stats": stats,
             "dir": check_dir or ""}
+
+
+# ────────────────────────────────────────────────────────────────
+# 施策管理表（Box に置く Excel。関係者が「担当者・状態・実施内容」を記入する）
+# ────────────────────────────────────────────────────────────────
+ACTION_SHEET = "施策管理"
+ACTION_COLS = {"設問ID": "qid", "担当（事業）": "owner", "担当者": "person", "状態": "status",
+               "期限": "due", "実施日": "done", "実施内容": "content", "対象ページURL": "url", "メモ": "memo"}
+ACTION_STATUS = ["未着手", "対応中", "完了", "見送り"]
+
+
+def _cell_text(v):
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else str(v)
+    return str(v).strip()
+
+
+def _cell_date(v):
+    d = _to_date(v) if v not in (None, "") else None
+    return d.isoformat() if d else _cell_text(v)
+
+
+def load_actions(path):
+    """{"file", "mtime", "rows":[...], "by_q":{設問ID:[行...]}, "warnings":[]}。
+    1設問に複数行（施策の履歴）を書いてよい。設問ID が空の行と、担当者・状態・実施内容がすべて空の行は無視。"""
+    out = {"file": path or "", "mtime": "", "rows": [], "by_q": {}, "owner": {}, "warnings": []}
+    if not path:
+        return out
+    if not os.path.isfile(path):
+        out["warnings"].append(f"施策管理表が見つかりません: {path}")
+        return out
+    out["mtime"] = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+    try:
+        book = read_xlsx(path)
+    except Exception as e:
+        out["warnings"].append(f"施策管理表を読めません（Excel で開いたまま保存中の可能性）：{e}")
+        return out
+    rows = book.get(ACTION_SHEET) or next(iter(book.values()), [])
+    # 見出し行（「設問ID」を含む行）を探す（上に説明行があってもよい）
+    hi = next((i for i, r in enumerate(rows[:10]) if any(_cell_text(c) == "設問ID" for c in r)), None)
+    if hi is None:
+        out["warnings"].append("施策管理表に「設問ID」の見出しがありません")
+        return out
+    head = [_cell_text(c) for c in rows[hi]]
+    idx = {v: head.index(k) for k, v in ACTION_COLS.items() if k in head}
+    for n, r in enumerate(rows[hi + 1:], start=hi + 2):
+        get = lambda key: r[idx[key]] if key in idx and idx[key] < len(r) else None
+        row = {"row": n, "qid": _cell_text(get("qid")), "owner": _cell_text(get("owner")),
+               "person": _cell_text(get("person")), "status": _cell_text(get("status")),
+               "due": _cell_date(get("due")), "done": _cell_date(get("done")),
+               "content": _cell_text(get("content")), "url": _cell_text(get("url")), "memo": _cell_text(get("memo"))}
+        if not row["qid"]:
+            continue
+        if row["status"] and row["status"] not in ACTION_STATUS:
+            out["warnings"].append(f"施策管理表 {n}行目：状態「{row['status']}」は {'／'.join(ACTION_STATUS)} のどれかにしてください")
+        if row["owner"]:
+            out["owner"][row["qid"]] = row["owner"]      # 担当（事業）だけの行も、担当の上書きには使う
+        if not any(row[k] for k in ("person", "status", "due", "done", "content", "url", "memo")):
+            continue
+        out["rows"].append(row)
+        out["by_q"].setdefault(row["qid"], []).append(row)
+    return out
