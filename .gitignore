@@ -13,3 +13,6 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# 自動更新タスクのログ
+logs/
