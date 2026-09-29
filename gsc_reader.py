@@ -20,6 +20,7 @@ import calendar
 import csv
 import glob
 import io
+import json
 import os
 import re
 import unicodedata
@@ -366,3 +367,64 @@ def build(gsc_dir, keywords_csv, sites=None):
         "log": log,
         "warnings": warnings,
     }
+
+
+# ────────────────────────────────────────────────────────────────
+# Google 検索チェック（monitoring の GUI＋ブックマークレットで毎月記録した CSV）
+# ────────────────────────────────────────────────────────────────
+def check_files(check_dir):
+    if not check_dir or not os.path.isdir(check_dir):
+        return []
+    return sorted(glob.glob(os.path.join(check_dir, "google_check_*.csv")))
+
+
+def _rank(v):
+    v = str(v or "").strip()
+    return int(v) if v.isdigit() else None
+
+
+def load_checks(check_dir, keywords):
+    """{"months":[新しい順], "by_month":{月:{設問ID:{"kw":記録, "q":記録}}}, "stats":{月:{done, aio, aio_own, aio_hosts}}}
+    記録 = {rank(int|None), out(圏外), own_url, aio, aio_own, aio_hosts[], comp[], top[[順位,ドメイン,タイトル]], at, method, term}"""
+    by_month, stats = {}, {}
+    for path in check_files(check_dir):
+        month = os.path.basename(path)[len("google_check_"):-len(".csv")]
+        raw = open(path, "rb").read()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = raw.decode("cp932", errors="replace")
+        m = by_month.setdefault(month, {})
+        st = stats.setdefault(month, {"done": 0, "aio": 0, "aio_own": 0, "aio_hosts": {}})
+        for r in csv.DictReader(io.StringIO(text, newline="")):
+            term = (r.get("検索語") or "").strip()
+            if not term:
+                continue
+            try:
+                top = json.loads(r.get("上位10件") or "[]")
+            except ValueError:
+                top = []
+            rank = _rank(r.get("自社最高順位"))
+            rec = {"term": term, "rank": rank, "out": rank is None,
+                   "own_url": (r.get("自社URL") or "").strip(),
+                   "aio": (r.get("AI Overview") or "") == "あり",
+                   "aio_own": (r.get("AIO自社引用") or "") == "あり",
+                   "aio_hosts": [h for h in (r.get("AIO引用元") or "").split(";") if h],
+                   "comp": [c for c in (r.get("競合（上位10件内）") or "").split(";") if c],
+                   "top": top[:10], "at": (r.get("観測日時") or "").strip(),
+                   "method": (r.get("記録方法") or "").strip()}
+            st["done"] += 1
+            if rec["aio"]:
+                st["aio"] += 1
+                for h in rec["aio_hosts"]:
+                    st["aio_hosts"][h] = st["aio_hosts"].get(h, 0) + 1
+            if rec["aio_own"]:
+                st["aio_own"] += 1
+            n = norm_query(term)
+            for qid in [x for x in (r.get("設問ID") or "").split(";") if x]:
+                slot = "kw" if n == norm_query((keywords.get(qid) or {}).get("obs", "")) else "q"
+                m.setdefault(qid, {})[slot] = rec
+    for st in stats.values():
+        st["aio_hosts"] = sorted(st["aio_hosts"].items(), key=lambda x: -x[1])[:15]
+    return {"months": sorted(by_month, reverse=True), "by_month": by_month, "stats": stats,
+            "dir": check_dir or ""}
