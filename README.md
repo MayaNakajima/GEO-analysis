@@ -8,17 +8,18 @@
 
 ---
 
-## 内蔵ダッシュボードとの役割分担
+## 役割分担（関係者の入口は analysis.html だけ）
 
-|  | 内蔵ダッシュボード（`monitoring/src/dashboard.py`） | 本アプリ（GEO-analysis） |
+|  | 本アプリ `analysis.html`（GEO-analysis） | 内蔵 dashboard.html / insights.html（`monitoring`） |
 |---|---|---|
-| 目的 | 日々の定点監視・軽量 | 回答全文の深掘り・突合分析 |
-| 入力 | `reports/*.json`（集計済み） | `results/*.csv`（回答全文・生データ） |
-| 見るもの | 出現率・推移・崖・ブレ | 回答本文／競合共起／引用URL／自社突合 |
-| ネット接続 | 不要 | 不要（P3 のみ将来スクレイピング） |
-| 一言 | 「今どうなっているか」 | 「なぜそうなのか・何を直すか」 |
+| 見る人 | **関係者（唯一の入口）** | **運用者向け**（計測の監視・不具合の確認） |
+| 入口 | 「ホーム」タブ：今どうなっているか → なぜか → 次に何をするか → 何を議論するか | 各 HTML を個別に開く |
+| 入力 | `results/*.csv`（回答全文）＋ `reports/index.json`・`reports/insights_*.json`（読むだけ） | `reports/*.json` |
+| 見るもの | ホーム（結論・注意・次にやること・議論ポイント）＋ 詳細タブ（推移・比較・競合共起・回答分析・クロス集計・引用URL・自社突合） | 出現率・推移・崖・ブレ、示唆レポート |
+| 置き場所 | Box「GEO-analysis」 | Box「GEO」 |
 
-内蔵側で「崖は D2」と分かったら、本アプリで「D2 で誰に負けているか・自社実績ページはあるか」を掘る、という導線です。
+monitoring は一切変更せず、出力ファイルを読むだけの疎結合です。示唆（insights）の中身は monitoring 側で作られ、本アプリはそれをホームに要約して見せます。
+データの受け渡し形式（読むキー・型・欠けたときの挙動）は `docs/分析アプリ_仕様書_v1.md` の「データの受け渡し形式」を参照。
 
 ---
 
@@ -50,19 +51,37 @@ CSV を再測定・追加したら `python generate.py` を再実行すれば最
 ```json
 {
   "results_dir": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\monitoring\\data\\results",
+  "reports_dir": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\monitoring\\data\\reports",
   "reference_md": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\Set2_実績スクレイピング_reference.md",
   "output_html": "C:\\Users\\612316\\Documents\\GitHub\\GEO-analysis\\analysis.html",
-  "share_dirs": ["C:\\Users\\612316\\Box\\事業推進Div□\\DX推進課\\生成AI\\GEO-analysis"]
+  "share_dirs": ["C:\\Users\\612316\\Box\\事業推進Div□\\DX推進課\\生成AI\\GEO-analysis"],
+  "measurement_notes": [{"date": "2026-08-31", "label": "回答欠測の修正（monitoring cbfd7ee）", "note": "この日以前の出現率とは比較できません"}],
+  "domain_owner": {"オリジナルユニフォーム": "UN", "インサイトセールス": "IS", "…": "…"},
+  "grounding_model_keywords": ["perplexity", "sonar", "grounding", "search"]
 }
 ```
 
-`share_dirs`（省略可）：生成後に `analysis.html` をコピーする共有フォルダ（関係者が開く BOX 等）。
+- `share_dirs`（省略可）：生成後に `analysis.html` をコピーする共有フォルダ（関係者が開く BOX 等）。
+- `reports_dir`（省略可・`--reports-dir` で上書き可）：ホームタブが読む `index.json`・`insights_*.json` の場所。無くても生成は成功し、ホームの該当ブロックが「データなし」になります。
+- `measurement_notes`：計測の断絶・注意事項。全回サマリーのチャートに破線、ホームの「計測上の注意」に表示。断絶日をまたぐ前回比は「比較対象外」。
+- `domain_owner`：事業ドメイン（`domain_label`）→ 担当事業（UN / SCH / MED / IS / コーポレート / 横断）。載っていないドメインは「未割当」と表示。
+- `grounding_model_keywords`：モデル名にこれを含めば「Web検索あり」とみなす。すべて非グラウンディングなら、ホームに「学習データ上の認知を測定中」と明記。
 
 > 定点観測アプリ（monitoring）は別リポジトリ・別開発環境にあり、今後修正の可能性があります。
 > 本アプリは **同じ CSV を読むだけの疎結合** なので、monitoring 側の改修と独立に運用できます。
 > monitoring の場所が変わったら config.json のパスだけ直してください。
 
 ---
+
+## ホーム（関係者向けの入口・初期表示）
+
+1) **今回の結論**：最新回の出現率（有効行が分母）と前回比（▲改善／▼低下／±横ばい。断絶をまたぐ場合は「比較対象外」）、指名／非指名別の出現率を1文で。
+2) **計測上の注意**：計測の断絶、最新回のエラー・空回答件数、稼働モデルと非グラウンディングの注記。
+3) **次にやること**：insights の改善アクション上位3件（優先度・対象・playbook・重視されている観点・想起されている競合・担当事業）。
+4) **今回の議論ポイント**：Q1 出た／消えた質問、Q2 代わりに挙がった競合・観点の上位5件、Q3 担当者・期限を書き込む表。
+5) **詳しく見るには**：各タブへのリンク。
+
+印刷（A4横）で 1〜2 枚に収まります（右上の「印刷」ボタン）。用語は見出し横の「?」にカーソルを当てると説明が出ます。
 
 ## 実装している分析（改善案 §3-2 の優先度順）
 
@@ -128,7 +147,7 @@ AI 回答に実際に登場した競合サイトのみを対象に取得し、�
 ```
 GEO-analysis/
 ├─ generate.py     … データ処理＋HTML生成（stdlibのみ）
-├─ config.json     … データパス・共有フォルダ設定
+├─ config.json     … データパス・共有フォルダ・計測の注記・担当対応表
 ├─ 更新して開く.bat … ダブルクリックで 再生成→BOXへコピー→ブラウザ表示
 ├─ analysis.html   … 生成物（.gitignore 対象・再生成可能）
 ├─ README.md

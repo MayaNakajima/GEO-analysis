@@ -1,8 +1,24 @@
 {
   "results_dir": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\monitoring\\data\\results",
+  "reports_dir": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\monitoring\\data\\reports",
   "reference_md": "C:\\Users\\612316\\Documents\\GitHub\\GEO\\Set2_実績スクレイピング_reference.md",
   "output_html": "C:\\Users\\612316\\Documents\\GitHub\\GEO-analysis\\analysis.html",
   "share_dirs": [
     "C:\\Users\\612316\\Box\\事業推進Div□\\DX推進課\\生成AI\\GEO-analysis"
-  ]
+  ],
+  "measurement_notes": [
+    {"date": "2026-08-31", "label": "回答欠測の修正（monitoring cbfd7ee）", "note": "この日以前の出現率とは比較できません"}
+  ],
+  "domain_owner": {
+    "オリジナルユニフォーム": "UN",
+    "スクール（学生服）": "SCH",
+    "メディカルウェア（病院向け）": "MED",
+    "メディカルウェア（ECサイト）": "MED",
+    "インサイトセールス": "IS",
+    "コーポレート": "コーポレート",
+    "空間ビジネス（スペースクリエイト）": "未割当",
+    "ABM横断（複数事業クロス）": "横断",
+    "ABM横断・コトデザイン": "横断"
+  },
+  "grounding_model_keywords": ["perplexity", "sonar", "grounding", "search"]
 }

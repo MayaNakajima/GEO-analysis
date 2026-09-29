@@ -7,9 +7,10 @@ GEO 定点観測 分析アプリ ── 生成スクリプト
       読み込み、「なぜ出ないのか・何を直すか」を掘り下げるための
       自己完結型 HTML ダッシュボードを 1 枚生成する。
 
-内蔵ダッシュボード（monitoring/src/dashboard.py）との役割分担：
-  ・内蔵  = 出現率・推移・特異度カーブ・ブレ（今どうなっているか）
-  ・本アプリ = 回答全文の内容分析・競合共起・突合（なぜ・何を直すか）
+役割分担：
+  ・本アプリ（analysis.html）= 関係者の唯一の入口。「ホーム」タブで 結論→注意→次にやること→議論ポイント、
+    詳細タブで 回答全文の内容分析・競合共起・突合（なぜ・何を直すか）
+  ・内蔵 dashboard / insights（monitoring）= 運用者向け。本アプリは reports/index.json・insights_*.json を読むだけ
 
 実装分析（改善案 §3-2 の優先度順）：
   P1  競合共起分析          … 当社が出ない回答で代わりに挙がる競合名を抽出・ランキング
@@ -22,6 +23,7 @@ GEO 定点観測 分析アプリ ── 生成スクリプト
 使い方：
     python generate.py                     # config.json の設定で生成
     python generate.py --results-dir <dir> --reference <md> --out <html>
+    python generate.py --reports-dir <dir>  # ホームタブ用の monitoring/data/reports を上書き
     python generate.py --open              # 生成後に共有フォルダへコピーしブラウザで開く
     （ふだんは「更新して開く.bat」をダブルクリックするだけで同じことができる）
 """
@@ -161,6 +163,11 @@ def load_config(path):
         "reference_md": "",
         "output_html": os.path.join(HERE, "analysis.html"),
         "share_dirs": [],   # 生成後に analysis.html をコピーする共有フォルダ（BOX 等）
+        "reports_dir": "",  # monitoring/data/reports（index.json・insights_*.json。ホームタブ用）
+        "measurement_notes": [],   # 計測の断絶・注意事項 [{date, label, note}]
+        "domain_owner": {},        # domain_label -> 担当事業（UN/SCH/MED/IS/コーポレート/横断）
+        # 稼働モデル名にこれらが含まれれば Web 検索（グラウンディング）ありとみなす
+        "grounding_model_keywords": ["perplexity", "sonar", "grounding", "search"],
     }
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
@@ -245,6 +252,58 @@ def load_rows(results_dir):
                     first_set = qset
         files_meta.append({"name": fn, "rows": n})
     return rows, files_meta
+
+
+_ins_re = re.compile(r'insights_(\d{8})_(\d{6})(?:_r\d+)?\.json$', re.I)
+INSIGHTS_KEYS = ("generated_at", "source", "summary", "weak_cells", "extraction", "actions")
+
+
+def load_reports(reports_dir):
+    """monitoring/data/reports から index.json と最新の insights_*.json を読む（ホームタブ用）。
+    無い・壊れている場合もエラーにせず、該当部分を None にして warnings に理由を残す。"""
+    rep = {"dir": reports_dir or "", "available": False, "index": None,
+           "insights": None, "insights_file": "", "insights_timing": "", "warnings": []}
+    if not reports_dir or not os.path.isdir(reports_dir):
+        rep["warnings"].append(f"reports_dir が見つかりません: {reports_dir or '（未設定）'}")
+        return rep
+    rep["available"] = True
+
+    ip = os.path.join(reports_dir, "index.json")
+    try:
+        with open(ip, encoding="utf-8-sig") as f:
+            idx = json.load(f)
+        if isinstance(idx, list):
+            rep["index"] = [e for e in idx if isinstance(e, dict)]
+        else:
+            rep["warnings"].append("index.json が配列ではありません（無視）")
+    except FileNotFoundError:
+        rep["warnings"].append("index.json がありません")
+    except (OSError, ValueError) as e:
+        rep["warnings"].append(f"index.json を読めません（{e}）")
+
+    # insights_YYYYMMDD_HHMMSS.json と insights_YYYYMMDD_HHMMSS_rN.json が混在 → 日時でソートし最新を採用
+    cands = []
+    for fp in glob.glob(os.path.join(reports_dir, "insights_*.json")):
+        m = _ins_re.search(os.path.basename(fp))
+        if m:
+            cands.append((f"{m.group(1)}_{m.group(2)}", os.path.basename(fp), fp))
+    cands.sort(reverse=True)
+    for timing, fn, fp in cands:
+        try:
+            with open(fp, encoding="utf-8-sig") as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("オブジェクトではありません")
+        except (OSError, ValueError) as e:
+            rep["warnings"].append(f"{fn} を読めません（{e}）。1つ前のファイルを試します")
+            continue
+        rep["insights"] = {k: d.get(k) for k in INSIGHTS_KEYS}
+        rep["insights_file"] = fn
+        rep["insights_timing"] = timing
+        break
+    if not cands:
+        rep["warnings"].append("insights_*.json がありません")
+    return rep
 
 
 def load_reference(md_path):
@@ -342,7 +401,7 @@ def extract_competitors(answer):
 # ────────────────────────────────────────────────────────────────
 # データ束ね
 # ────────────────────────────────────────────────────────────────
-def build_payload(rows, files_meta, ref, cfg):
+def build_payload(rows, files_meta, ref, cfg, reports=None):
     # 顧客ストップリスト（reference + ハードコード）を competitors から後処理除外
     customer_stop = set(CUSTOMER_HINTS) | set(ref.get("customers", []))
     cust_norm = {_norm_key(c) for c in customer_stop}
@@ -413,6 +472,14 @@ def build_payload(rows, files_meta, ref, cfg):
             for idx, r in enumerate(rows)
         ],
         "reference": ref,
+        # ホームタブ用：monitoring の reports（読むだけ）＋ config の注記・担当対応表
+        "reports": reports or load_reports(""),
+        "home": {
+            "measurement_notes": [n for n in (cfg.get("measurement_notes") or [])
+                                  if isinstance(n, dict) and n.get("date")],
+            "domain_owner": cfg.get("domain_owner") or {},
+            "grounding_model_keywords": cfg.get("grounding_model_keywords") or [],
+        },
     }
     return payload
 
@@ -436,6 +503,7 @@ def main():
     ap.add_argument("--results-dir", default=None)
     ap.add_argument("--reference", default=None)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--reports-dir", default=None, help="monitoring/data/reports（ホームタブ用）")
     ap.add_argument("--open", action="store_true", help="生成後に analysis.html をブラウザで開く")
     ap.add_argument("--no-share", action="store_true", help="share_dirs へのコピーを行わない")
     args = ap.parse_args()
@@ -447,13 +515,16 @@ def main():
         cfg["reference_md"] = args.reference
     if args.out:
         cfg["output_html"] = args.out
+    if args.reports_dir:
+        cfg["reports_dir"] = args.reports_dir
 
     if not cfg.get("results_dir"):
         raise SystemExit("[ERROR] results_dir 未設定。config.json か --results-dir で指定してください。")
 
     rows, files_meta = load_rows(cfg["results_dir"])
     ref = load_reference(cfg.get("reference_md", ""))
-    payload = build_payload(rows, files_meta, ref, cfg)
+    reports = load_reports(cfg.get("reports_dir", ""))
+    payload = build_payload(rows, files_meta, ref, cfg, reports)
     html_text = render_html(payload)
 
     out = cfg["output_html"]
@@ -466,6 +537,15 @@ def main():
     print(f"     rows={len(rows)}  hits={hits}  files={len(files_meta)}")
     print(f"     competitors extracted (miss rows): "
           f"{sum(len(r['competitors']) for r in rows)} mentions")
+    for w in reports["warnings"]:
+        print(f"[WARN] {w}")
+    if reports["insights_file"]:
+        latest_timing = max(r["timing"] for r in rows)
+        same = "最新回と一致" if reports["insights_timing"] == latest_timing else f"最新回 {latest_timing} と不一致"
+        print(f"     insights: {reports['insights_file']}（{same}）  "
+              f"index: {len(reports['index'] or [])} timings")
+    else:
+        print("     insights: なし（ホームの該当ブロックは「データなし」表示）")
 
     if not args.no_share:
         copy_to_share_dirs(out, cfg.get("share_dirs") or [])
@@ -548,16 +628,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GEO 定点観測 分析アプリ ｜ 回答全文の深掘り・突合</title>
+<title>GEO 定点観測 ｜ 生成AI出現モニタリング</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-  :root{--bg:#0f172a;--card:#1e293b;--ink:#e2e8f0;--sub:#94a3b8;--accent:#38bdf8;
-        --good:#34d399;--warn:#fbbf24;--bad:#f87171;--line:#334155;--panel:#0b1220;}
+  /* 明るくクリーンなトーン（コーポレートサイトに合わせる）。暗い単色背景は使わない */
+  :root{--bg:#f5f7fa;--card:#ffffff;--ink:#1f2a37;--sub:#5f6b7a;--accent:#1d4f91;
+        --good:#1a7f4b;--warn:#b7791f;--bad:#c0392b;--line:#dde3ea;--panel:#f1f4f8;}
   *{box-sizing:border-box;}
-  body{margin:0;font-family:"Segoe UI","Hiragino Kaku Gothic ProN",Meiryo,sans-serif;
+  body{margin:0;font-family:"Segoe UI","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
        background:var(--bg);color:var(--ink);}
-  header{padding:20px 28px;border-bottom:1px solid var(--line);}
-  header h1{margin:0;font-size:20px;}
+  header{padding:20px 28px;border-bottom:1px solid var(--line);background:var(--card);
+         border-top:4px solid var(--accent);}
+  header h1{margin:0;font-size:20px;letter-spacing:.02em;}
   header .sub{color:var(--sub);font-size:13px;margin-top:4px;}
   main{padding:0 28px 60px;}
   .tabs{display:flex;gap:6px;margin:16px 0 0;flex-wrap:wrap;border-bottom:1px solid var(--line);}
@@ -614,18 +696,101 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           border:1px solid var(--line);border-radius:10px;padding:14px 16px;max-height:52vh;overflow:auto;}
   .tagH{color:var(--good);font-weight:700;} .tagM{color:var(--bad);font-weight:700;}
   .checklist td .st-yes{color:var(--good);} .checklist td .st-no{color:var(--bad);}
+  /* ── ホーム */
+  .home-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin:2px 0 12px;}
+  .home-head .ttl{font-size:18px;font-weight:700;}
+  .hblock{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 18px;margin:0 0 14px;}
+  .hblock>h2,.hblock>summary{margin:0 0 10px;font-size:15px;font-weight:700;border-left:3px solid var(--accent);padding-left:8px;}
+  details.hblock>summary{cursor:pointer;}
+  details.hblock:not([open])>summary{margin-bottom:0;}
+  .concl{font-size:16px;line-height:1.8;margin:0 0 12px;}
+  .kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+  @media(max-width:760px){.kpis{grid-template-columns:1fr;}}
+  .kpi-box{border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:var(--panel);}
+  .kpi-box .lbl{font-size:12px;color:var(--sub);}
+  .kpi-box .val{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;}
+  .kpi-box .dt{font-size:12px;color:var(--sub);}
+  .delta-up{color:var(--good);font-weight:700;} .delta-down{color:var(--bad);font-weight:700;}
+  .delta-flat{color:var(--sub);font-weight:700;} .delta-na{color:var(--warn);font-weight:700;}
+  .notes li{margin:4px 0;line-height:1.7;font-size:13.5px;}
+  .acts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;}
+  @media(max-width:960px){.acts{grid-template-columns:1fr;}}
+  .act{border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:13px;line-height:1.7;}
+  .act .hd{font-weight:700;font-size:14px;margin-bottom:4px;}
+  .act .k{color:var(--sub);font-size:11.5px;margin-top:6px;}
+  .pill.pri{color:#fff;background:var(--bad);border-color:var(--bad);}
+  .pill.pri.mid{background:var(--warn);border-color:var(--warn);}
+  .pill.pri.low{background:var(--sub);border-color:var(--sub);}
+  .pill.own{color:var(--accent);border-color:var(--accent);background:#fff;font-weight:700;}
+  .qgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  @media(max-width:960px){.qgrid{grid-template-columns:1fr;}}
+  .q{font-weight:700;margin:0 0 6px;font-size:14px;}
+  .q .no{display:inline-block;background:var(--accent);color:#fff;border-radius:6px;padding:0 7px;margin-right:6px;}
+  table.memo th,.hblock td.nw{white-space:nowrap;} .hblock td.num{text-align:right;font-variant-numeric:tabular-nums;}
+  table.memo td{height:34px;} table.memo td.blank{min-width:110px;background:#fff;border:1px dashed var(--line);}
+  .nodata{color:var(--sub);background:var(--panel);border:1px dashed var(--line);border-radius:8px;padding:10px 14px;font-size:13px;}
+  .links{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;}
+  .links button{text-align:left;background:var(--panel);line-height:1.6;padding:9px 12px;}
+  .links button b{color:var(--accent);}
+  .help{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;
+        border:1px solid var(--accent);color:var(--accent);font-size:10.5px;font-weight:700;cursor:help;
+        position:relative;margin-left:4px;vertical-align:1px;background:#fff;}
+  .help:hover::after,.help:focus::after{content:attr(data-tip);position:absolute;left:50%;top:22px;transform:translateX(-50%);
+        width:260px;background:var(--ink);color:#fff;font-weight:400;font-size:12px;line-height:1.6;
+        padding:8px 10px;border-radius:8px;z-index:20;white-space:normal;text-align:left;}
+  /* ── 印刷（A4横）：表示中のタブだけを出す。ホームは1〜2枚に収める */
+  @media print{
+    @page{size:A4 landscape;margin:8mm;}
+    *{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+    body{background:#fff;font-size:11px;}
+    header{padding:6px 0;border-top:none;} header .sub{display:none;}
+    header h1{font-size:14px;}
+    main{padding:0;}
+    .tabs,.filters,details.howto,.modal,.noprint,.help{display:none!important;}
+    section{display:none!important;padding-top:4px;} section.active{display:block!important;}
+    .hblock{padding:7px 10px;margin:0 0 6px;break-inside:avoid;}
+    .hblock>h2,.hblock>summary{font-size:12.5px;margin-bottom:5px;}
+    .concl{font-size:12.5px;margin-bottom:6px;line-height:1.6;}
+    .kpi-box{padding:5px 9px;} .kpi-box .val{font-size:18px;}
+    .notes li{font-size:11px;margin:1px 0;line-height:1.5;}
+    .act{padding:6px 9px;font-size:10.5px;line-height:1.5;}
+    .act .hd{font-size:11.5px;}
+    table{font-size:10.5px;} th,td{padding:3px 6px;} th{position:static;}
+    table.memo td{height:28px;}
+    .kpis,.acts{grid-template-columns:repeat(3,minmax(0,1fr))!important;}
+    .qgrid{grid-template-columns:1fr 1fr!important;}
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>GEO 定点観測 分析アプリ <span class="muted">｜ 回答全文の深掘り・突合</span></h1>
+  <h1>GEO 定点観測 ｜ 生成AI出現モニタリング <span class="muted">｜ 関係者向けの入口（ホーム → 詳しい分析）</span></h1>
   <div class="sub" id="hdr-sub"></div>
 </header>
 <main>
   <div class="tabs" id="tabs"></div>
 
+  <!-- ホーム：今どうなっているか → なぜか → 次に何をするか → 何を議論するか -->
+  <section id="s-home" class="active">
+    <div class="home-head"><div class="ttl" id="home-title">今回のまとめ</div>
+      <div class="muted" id="home-asof"></div></div>
+    <div class="hblock"><h2>1) 今回の結論</h2><div id="home-concl"></div></div>
+    <details class="hblock" open><summary>2) 計測上の注意</summary><div id="home-notes"></div></details>
+    <div class="hblock"><h2>3) 次にやること <span class="muted" style="font-weight:400">（示唆レポートの改善アクション 上位3件）</span></h2>
+      <div id="home-actions"></div></div>
+    <div class="hblock"><h2>4) 今回の議論ポイント</h2>
+      <div class="qgrid">
+        <div><div class="q"><span class="no">Q1</span>前回から出た／消えた質問は？</div><div id="home-q1"></div></div>
+        <div><div class="q"><span class="no">Q2</span>出なかった質問で、AIは代わりに誰を・どんな観点で挙げたか？</div><div id="home-q2"></div></div>
+      </div>
+      <div class="q" style="margin-top:14px"><span class="no">Q3</span>次の回までに何を直すか・担当は？</div>
+      <div id="home-q3"></div>
+    </div>
+    <div class="hblock noprint"><h2>5) 詳しく見るには</h2><div class="links" id="home-links"></div></div>
+  </section>
+
   <!-- P1: 競合共起 -->
-  <section id="s-comp" class="active">
+  <section id="s-comp">
     <div class="summary" id="comp-summary"></div>
     <details class="howto"><summary>この画面の見方</summary>
       <div class="body">当社が出なかった回答（未言及）で、代わりに挙がっている企業名を抽出・ランキングします。
@@ -767,18 +932,22 @@ $("#hdr-sub").innerHTML =
 
 // ── タブ
 const TABS = [
+  ["s-home","ホーム"],
   ["s-comp","競合共起 (P1)"],["s-context","回答分析"],["s-cross","多軸クロス集計 (P1)"],
   ["s-compare","過去回比較"],["s-runs","全回サマリー"],
   ["s-url","引用URL (P2)"],["s-self","自社突合 (P2)"],["s-p3","競合サイト (P3)"]
 ];
 const tabsEl = $("#tabs");
+function showTab(id){
+  $$(".tab").forEach(t=>t.classList.toggle("active", t.dataset.id===id));
+  $$("section").forEach(s=>s.classList.remove("active")); $("#"+id).classList.add("active");
+  if(id==="s-comp") renderComp(); if(id==="s-context") renderContext();
+  if(id==="s-cross") renderCross(); if(id==="s-compare") renderCompare();
+  if(id==="s-runs") renderRuns();
+}
 TABS.forEach(([id,label],i)=>{
   const b=document.createElement("div"); b.className="tab"+(i===0?" active":""); b.textContent=label;
-  b.onclick=()=>{ $$(".tab").forEach(t=>t.classList.remove("active")); b.classList.add("active");
-    $$("section").forEach(s=>s.classList.remove("active")); $("#"+id).classList.add("active");
-    if(id==="s-comp") renderComp(); if(id==="s-context") renderContext();
-    if(id==="s-cross") renderCross(); if(id==="s-compare") renderCompare();
-    if(id==="s-runs") renderRuns(); };
+  b.dataset.id=id; b.onclick=()=>showTab(id);
   tabsEl.appendChild(b);
 });
 
@@ -832,7 +1001,7 @@ function passFilter(r, st){
 // ── 出現率ヘルパ
 function rate(rows){ if(!rows.length) return null; const h=rows.filter(r=>r.hit).length; return Math.round(h/rows.length*1000)/10; }
 function heat(v){ if(v==null) return "var(--panel)"; const a=Math.min(v/30,1);
-  return `rgba(56,189,248,${0.10+a*0.55})`; }
+  return `rgba(29,79,145,${0.07+a*0.38})`; }
 
 // ─────────────────────────────────────────── P1 競合共起
 let compChart=null;
@@ -857,11 +1026,11 @@ function renderComp(){
   compChart=new Chart($("#chart-comp"),{type:"bar",
     data:{labels:top.map(t=>t.name),
       datasets:[{label:"登場回答数",data:top.map(t=>t.count),
-        backgroundColor:"rgba(56,189,248,.6)",borderColor:"#38bdf8",borderWidth:1}]},
+        backgroundColor:"rgba(29,79,145,.6)",borderColor:"#1d4f91",borderWidth:1}]},
     options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,
       plugins:{legend:{display:false}},
-      scales:{x:{ticks:{color:"#94a3b8"},grid:{color:"#334155"}},
-              y:{ticks:{color:"#e2e8f0"},grid:{display:false}}}}});
+      scales:{x:{ticks:{color:"#5f6b7a"},grid:{color:"#e6ebf1"}},
+              y:{ticks:{color:"#1f2a37"},grid:{display:false}}}}});
   // 表
   $("#comp-table").innerHTML =
     `<table><thead><tr><th>#</th><th>競合候補</th><th>登場回答数</th><th></th></tr></thead><tbody>`
@@ -1208,11 +1377,11 @@ function renderContext(){
     ctxChart=new Chart($("#chart-ctx"),{type:"bar",
       data:{labels:critList.map(o=>o.label),
         datasets:[{label:"該当回答数",data:critList.map(o=>o.c),
-          backgroundColor:"rgba(52,211,153,.55)",borderColor:"#34d399",borderWidth:1}]},
+          backgroundColor:"rgba(26,127,75,.45)",borderColor:"#1a7f4b",borderWidth:1}]},
       options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,
         plugins:{legend:{display:false}},
-        scales:{x:{ticks:{color:"#94a3b8"},grid:{color:"#334155"}},
-                y:{ticks:{color:"#e2e8f0"},grid:{display:false}}}}});
+        scales:{x:{ticks:{color:"#5f6b7a"},grid:{color:"#e6ebf1"}},
+                y:{ticks:{color:"#1f2a37"},grid:{display:false}}}}});
     $("#ctx-crit").innerHTML=`<table><thead><tr><th>評価軸</th><th>該当回答数</th><th>該当率</th><th></th></tr></thead><tbody>`
       + critList.map(o=>`<tr class="click" onclick='showCritRows(${JSON.stringify(o.k)})'>
           <td>${esc(o.label)}</td><td class="rate">${o.c}</td><td class="rate">${Math.round(o.c/missN*1000)/10}%</td>
@@ -1278,6 +1447,37 @@ function showCritRows(k){
 
 // ─────────────────────────────────────────── 全回サマリー
 let runsChart=null;
+// 計測の断絶（config.measurement_notes）：回キー YYYYMMDD_… から日付を取り、断絶日をまたぐ位置を求める
+const NOTES = ((DATA.home||{}).measurement_notes||[]).slice().sort((a,b)=>a.date<b.date?-1:1);
+function unitDate(key){ const m=/^(\d{4})(\d{2})(\d{2})_/.exec(key||""); return m?`${m[1]}-${m[2]}-${m[3]}`:""; }
+function breakMarks(units){ // [{idx, note}]：units[idx-1] が断絶日より前、units[idx] が断絶日以後
+  const out=[];
+  NOTES.forEach(n=>{ for(let i=1;i<units.length;i++){
+    const a=unitDate(units[i-1]), b=unitDate(units[i]);
+    if(a && b && a<n.date && b>=n.date){ out.push({idx:i,note:n}); break; } } });
+  return out;
+}
+function crossesBreak(keyA,keyB){ // A→B の比較が断絶日をまたぐなら該当 note を返す
+  const a=unitDate(keyA), b=unitDate(keyB); if(!a||!b) return null;
+  const lo=a<b?a:b, hi=a<b?b:a;
+  return NOTES.find(n=>lo<n.date && hi>=n.date)||null;
+}
+// annotation プラグインを使わずに、断絶より前を薄く塗り・縦の破線を引くインラインプラグイン
+const BREAK_PLUGIN={id:"breakLines",
+  beforeDatasetsDraw(chart,args,opts){
+    const marks=(opts&&opts.marks)||[]; if(!marks.length) return;
+    const {ctx,chartArea:ar,scales:{x}}=chart;
+    marks.forEach(m=>{
+      const xm=(x.getPixelForValue(m.idx-1)+x.getPixelForValue(m.idx))/2;
+      ctx.save();
+      ctx.fillStyle="rgba(95,107,122,.10)"; ctx.fillRect(ar.left,ar.top,xm-ar.left,ar.bottom-ar.top);
+      ctx.strokeStyle="#b7791f"; ctx.lineWidth=2; ctx.setLineDash([5,4]);
+      ctx.beginPath(); ctx.moveTo(xm,ar.top); ctx.lineTo(xm,ar.bottom); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle="#b7791f"; ctx.font="11px sans-serif"; ctx.textAlign="right";
+      ctx.fillText(`← ${m.note.date.slice(5).replace("-","/")} 以前は比較不可`,xm-4,ar.top+12);
+      ctx.restore();
+    });
+  }};
 function passRunsFilter(r,st){
   if(st.domain && r.domain!==st.domain) return false;
   if(st.tier && r.tier!==st.tier) return false;
@@ -1308,15 +1508,19 @@ function renderRuns(){
     +`（有効行 ${allValid.length} 中 ヒット ${allValid.filter(r=>r.hit).length}）。`
     +`<span class="muted"> エラーのみの回は集計から自動除外。</span>`;
   if(runsChart){ runsChart.destroy(); runsChart=null; }
+  const marks=breakMarks(per.map(p=>p.u));
+  const noteSets=marks.map(m=>({label:`┆ ${m.note.date} ${m.note.label}：${m.note.note||""}`,data:[],
+    borderColor:"#b7791f",borderDash:[5,4],borderWidth:2,backgroundColor:"rgba(95,107,122,.14)",pointRadius:0}));
   runsChart=new Chart($("#chart-runs"),{type:"line",
     data:{labels:per.map(p=>p.label),
       datasets:[{label:"出現率%",data:per.map(p=>p.rate),spanGaps:true,tension:.25,
-        borderColor:"#38bdf8",backgroundColor:"rgba(56,189,248,.2)",fill:true,
-        pointRadius:4,pointBackgroundColor:"#38bdf8"}]},
+        borderColor:"#1d4f91",backgroundColor:"rgba(29,79,145,.2)",fill:true,
+        pointRadius:4,pointBackgroundColor:"#1d4f91"}, ...noteSets]},
+    plugins:[BREAK_PLUGIN],
     options:{responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{display:false}},
-      scales:{x:{ticks:{color:"#94a3b8"},grid:{color:"#334155"}},
-              y:{beginAtZero:true,ticks:{color:"#94a3b8"},grid:{color:"#334155"}}}}});
+      plugins:{legend:{display:marks.length>0,labels:{color:"#1f2a37",boxWidth:18}},breakLines:{marks}},
+      scales:{x:{ticks:{color:"#5f6b7a"},grid:{color:"#e6ebf1"}},
+              y:{beginAtZero:true,ticks:{color:"#5f6b7a"},grid:{color:"#e6ebf1"}}}}});
   $("#runs-table").innerHTML=
     `<table><thead><tr><th>回</th><th>有効行</th><th>hits</th><th>出現率</th><th>エラー</th><th>空</th><th>ユニーク競合</th><th>トップ競合</th></tr></thead><tbody>`
     + per.map(p=>`<tr class="click" onclick='showRunRows(${JSON.stringify(gran)},${JSON.stringify(p.u)})'>
@@ -1375,6 +1579,179 @@ function buildRunsFilters(){
   rf.appendChild(rb); mount.appendChild(rf);
 }
 
+// ─────────────────────────────────────────── ホーム（関係者向けの入口）
+const REP = DATA.reports||{};
+const HOME = DATA.home||{};
+const escAttr = s => esc(s).replace(/"/g,"&quot;");
+const HELP = {
+  rate:"出現率＝AIの回答に当社（オンワード）が登場した割合。分母は有効行（エラー・空回答を除いた回答数）で、全回サマリーと同じ計算です。",
+  valid:"有効行＝エラー（API失敗など）と空回答を除いた、中身のある回答の件数。出現率の分母に使います。",
+  nom:"指名＝質問文に社名が入っている質問（Set2 の D1、Set1 の社名系）。非指名＝社名を含まない質問（Set2 の D2〜D4、Set1 の一般質問）。増やしたいのは非指名での出現です。",
+  ground:"非グラウンディング＝AIが Web 検索をせず、学習済みの知識だけで答える方式。サイトを直しても、次にAIが学習し直すまで結果に反映されにくい。",
+};
+const help = k => `<span class="help" tabindex="0" data-tip="${escAttr(HELP[k])}" aria-label="${escAttr(HELP[k])}">?</span>`;
+const nodata = msg => `<div class="nodata"><b>データなし</b>${msg?`<span class="muted">（${esc(msg)}）</span>`:""}</div>`;
+const arr = x => Array.isArray(x)?x:[];
+const OWN_LC = (DATA.meta.own_names||[]).map(s=>String(s).toLowerCase());
+function isNominated(r){ // 指名＝Set2 の D1／Set1 は質問文に社名を含むもの（社名系）
+  if(r.set==="set2") return r.tier==="D1";
+  const q=(r.question||"").toLowerCase(); return OWN_LC.some(o=>o && q.indexOf(o)>=0);
+}
+function mmdd(key){ const d=unitDate(key); return d?d.slice(5).replace("-","/"):String(key||""); }
+function homeStat(rows){ const v=rows.filter(isValid);
+  return {n:rows.length,valid:v.length,hits:v.filter(r=>r.hit).length,rate:runRate(rows),
+          err:rows.filter(r=>r.atype==="error").length,emp:rows.filter(r=>r.atype==="empty").length}; }
+function homeDelta(a,b,brk,hasPrev){
+  if(!hasPrev) return `<span class="delta-na">前回データなし</span>`;
+  if(brk) return `<span class="delta-na">比較対象外</span><span class="muted">（${esc(brk.date)} ${esc(brk.label)} をまたぐため）</span>`;
+  if(a==null||b==null) return `<span class="delta-na">比較できません</span>`;
+  const d=Math.round((b-a)*10)/10;
+  if(d>0) return `<span class="delta-up">▲ 改善 +${d}pt</span>`;
+  if(d<0) return `<span class="delta-down">▼ 低下 ${d}pt</span>`;
+  return `<span class="delta-flat">± 横ばい 0pt</span>`;
+}
+const pct = v => v==null?"–":v+"%";
+const pills = (xs,cls) => arr(xs).length ? arr(xs).map(x=>`<span class="pill ${cls||""}">${esc(x)}</span>`).join(" ") : `<span class="muted">–</span>`;
+const ownerOf = label => (HOME.domain_owner||{})[label] || "未割当";
+function topActions(){
+  const ins=REP.insights; if(!ins || !Array.isArray(ins.actions)) return null;
+  const PRI={"高":0,"中":1,"低":2};
+  return ins.actions.filter(a=>a && typeof a==="object").map((a,i)=>({a,i}))
+    .sort((x,y)=>((PRI[x.a.priority]??9)-(PRI[y.a.priority]??9))||x.i-y.i).slice(0,3).map(o=>o.a);
+}
+function renderHome(){
+  const runs=D.runs.filter(u=>runRate(ROWS.filter(r=>r.run===u))!=null);  // 有効行のある回だけ
+  const L=runs[runs.length-1]||null, P=runs.length>1?runs[runs.length-2]:null;
+  const lr=L?ROWS.filter(r=>r.run===L):[], pr=P?ROWS.filter(r=>r.run===P):[];
+  const brk=P?crossesBreak(P,L):null;
+  const lab=k=>D.run_labels[k]||k;
+  const latestTiming=lr.length?lr[0].timing:"";
+  const insMismatch = REP.insights && REP.insights_timing && REP.insights_timing!==latestTiming;
+  const insNote = insMismatch
+    ? `<div class="note" style="margin:0 0 10px">示唆は <b>${esc(mmdd(REP.insights_timing))} 実行分</b>に基づく（最新回 ${esc(mmdd(L))} の示唆レポートはまだありません）。</div>` : "";
+  $("#home-asof").innerHTML = L
+    ? `最新回：<b>${esc(lab(L))}</b>${P?` ／ 前回：${esc(lab(P))}`:""} ／ 生成：${esc(DATA.meta.generated_at)}`
+      + ` <button class="noprint" style="margin-left:8px" onclick="window.print()">印刷（A4横）</button>` : "";
+
+  // 1) 今回の結論
+  if(!L){ $("#home-concl").innerHTML=nodata("有効な回答のある回がありません"); }
+  else {
+    const all=homeStat(lr), allP=homeStat(pr);
+    const nom=homeStat(lr.filter(isNominated)), non=homeStat(lr.filter(r=>!isNominated(r)));
+    const nomP=homeStat(pr.filter(isNominated)), nonP=homeStat(pr.filter(r=>!isNominated(r)));
+    let verdict="";
+    if(non.rate!=null){
+      if(non.rate<5 && (nom.rate??0)>non.rate) verdict=`<b>非指名での出現が課題</b>（社名を出さずに聞かれると当社が挙がらない）。`;
+      else if(non.rate>=5) verdict=`非指名でも出現が見られます。`;
+      else verdict=`指名・非指名とも出現が少ない状態です。`;
+    }
+    const kpi=(title,s,sp)=>`<div class="kpi-box"><div class="lbl">${title}</div>
+      <div class="val">${pct(s.rate)}</div>
+      <div class="dt">有効行 ${s.valid} 件中 ${s.hits} 件 ／ 前回比 ${homeDelta(sp.rate,s.rate,brk,!!P)}</div></div>`;
+    $("#home-concl").innerHTML =
+      `<p class="concl">${esc(lab(L))} 実行分の出現率${help("rate")}は <b>${pct(all.rate)}</b>（有効行${help("valid")} ${all.valid} 件中 ${all.hits} 件）、`
+      +`前回比 ${homeDelta(allP.rate,all.rate,brk,!!P)}。`
+      +`指名質問${help("nom")}では <b>${pct(nom.rate)}</b>、非指名質問では <b>${pct(non.rate)}</b>。${verdict}</p>`
+      +`<div class="kpis">${kpi("全体の出現率",all,allP)}${kpi("指名質問（D1・社名系）",nom,nomP)}${kpi("非指名質問（D2以下・Set1一般）",non,nonP)}</div>`;
+  }
+
+  // 2) 計測上の注意
+  const items=[];
+  NOTES.forEach(n=>items.push(`<b>計測の断絶：${esc(n.date)} ${esc(n.label)}</b> — ${esc(n.note||"")}。`
+    +(brk===n?`今回の前回比はこの断絶をまたぐため比較対象外です。`:``)
+    +`<span class="muted">（全回サマリーの推移チャートに破線で表示）</span>`));
+  if(L){
+    const s=homeStat(lr);
+    items.push(`最新回（${esc(lab(L))}）：全 ${s.n} 行のうち <b>有効行 ${s.valid}</b>${help("valid")}（エラー ${s.err} 件・空回答 ${s.emp} 件）。出現率はこの有効行を分母に計算しています。`);
+    const idx=arr(REP.index).find(e=>e.timing_id===latestTiming);
+    items.push(idx
+      ? `参考：monitoring 側の集計（index.json）は出現率 ${esc(idx.overall_mean)}%・安定度 ${esc(idx.stability)}%。こちらは空回答も分母に含むため、上の数値より低く出ることがあります。`
+      : `参考：monitoring 側の集計（index.json）：<b>データなし</b>`);
+    const models = (idx && arr(idx.models).length) ? arr(idx.models) : [...new Set(lr.map(r=>r.model).filter(Boolean))];
+    const kw=arr(HOME.grounding_model_keywords).map(s=>String(s).toLowerCase()).filter(Boolean);
+    const grounded=models.filter(m=>kw.some(k=>String(m).toLowerCase().indexOf(k)>=0));
+    items.push(`稼働モデル：${models.map(m=>`<span class="pill">${esc(m)}｜${grounded.includes(m)?"Web検索あり":"非グラウンディング"}</span>`).join(" ")}${help("ground")}`
+      + (models.length && !grounded.length ? `<br><b>学習データ上の認知を測定中。サイト施策の効果は週単位では動きにくい。</b>` : ``));
+  }
+  if(!REP.available) items.push(`monitoring の reports フォルダを読めません：<b>データなし</b> <span class="muted">（${esc(REP.dir||"reports_dir 未設定")}）</span>`);
+  if(insMismatch) items.push(`次にやること・Q2・Q3 の示唆は <b>${esc(mmdd(REP.insights_timing))} 実行分</b>（${esc(REP.insights_file)}）に基づきます。`);
+  $("#home-notes").innerHTML=`<ul class="notes" style="margin:0;padding-left:20px">${items.map(x=>`<li>${x}</li>`).join("")}</ul>`;
+
+  // 3) 次にやること
+  const top=topActions();
+  const priCls=p=>p==="高"?"":(p==="中"?"mid":"low");
+  $("#home-actions").innerHTML = top==null
+    ? nodata(REP.available?"insights_*.json がありません／読めません":"reports_dir が見つかりません")
+    : (!top.length ? nodata("改善アクションは 0 件です")
+      : insNote + `<div class="acts">` + top.map((a,i)=>`<div class="act">
+          <div class="hd"><span class="pill pri ${priCls(a.priority)}">優先度 ${esc(a.priority||"–")}</span>
+            ${i+1}. ${esc(a.domain)} × ${esc(a.type)} <span class="pill own">担当 ${esc(ownerOf(a.domain))}</span></div>
+          <div class="muted">出現率 ${esc(a.rate)}%（${esc(a.total)} 件中 ${esc(a.miss)} 件で非出現）</div>
+          <div class="k">打ち手（playbook）</div><div>${esc(a.playbook||"–")}</div>
+          <div class="k">AIが重視している観点（cover_attributes）</div><div>${pills(a.cover_attributes)}</div>
+          <div class="k">代わりに想起されている競合（beating_competitors）</div><div>${pills(a.beating_competitors,"bad")}</div>
+        </div>`).join("") + `</div>`);
+
+  // 4) Q1 出た／消えた（過去回比較の反転ロジックを再利用）
+  if(!P){ $("#home-q1").innerHTML=nodata("比較できる前回がありません"); }
+  else {
+    const qa=byQid(pr), qb=byQid(lr);
+    const common=Object.keys(qa).filter(q=>q in qb);
+    const gained=common.filter(q=>!qa[q].hit&&qb[q].hit), lost=common.filter(q=>qa[q].hit&&!qb[q].hit);
+    const emptyNow=q=>qb[q].idxs.every(i=>!isValid(ROWS[i]));
+    const MAX=12; const list=[...gained.map(q=>["g",q]),...lost.map(q=>["l",q])];
+    const rowsH=list.slice(0,MAX).map(([k,q])=>{ const o=qb[q];
+      return `<tr class="click" onclick='showFlip(${JSON.stringify(q)},${JSON.stringify(qa[q].rep)},${JSON.stringify(qb[q].rep)})'>
+        <td class="nw">${k==="g"?'<span class="tagH">出た↑</span>':'<span class="tagM">消えた↓</span>'+(emptyNow(q)?'<span class="muted">（今回は空回答）</span>':'')}</td>
+        <td><b>${esc(q)}</b></td><td class="muted">${esc((o.q||"").slice(0,40))}</td></tr>`; }).join("");
+    $("#home-q1").innerHTML =
+      (brk?`<div class="note" style="margin:0 0 8px">${esc(brk.date)} の断絶をまたぐ比較です。参考程度に見てください。</div>`:"")
+      +`<div class="muted" style="margin-bottom:6px">${esc(lab(P))} → ${esc(lab(L))}：共通質問 ${common.length} 件のうち
+        <span class="tagH">出た↑ ${gained.length}</span> ／ <span class="tagM">消えた↓ ${lost.length}</span></div>`
+      +(rowsH?`<table><thead><tr><th>変化</th><th>質問ID</th><th>質問</th></tr></thead><tbody>${rowsH}</tbody></table>`
+             :`<div class="muted">反転した質問はありません（前回と同じ結果）。</div>`)
+      +(list.length>MAX?`<div class="muted">ほか ${list.length-MAX} 件は「過去回比較」タブで確認できます。</div>`:"")
+      +`<div class="muted noprint" style="margin-top:4px">行クリックで前回・今回の回答全文を並べて比較。</div>`;
+  }
+
+  // 4) Q2 代わりに誰を・どんな観点で
+  const ex=REP.insights && REP.insights.extraction;
+  if(!ex || typeof ex!=="object"){ $("#home-q2").innerHTML=nodata(REP.available?"insights の extraction がありません":"reports_dir が見つかりません"); }
+  else {
+    const t5=(xs,title)=>{ const top5=arr(xs).filter(Array.isArray).slice(0,5);
+      return `<table><thead><tr><th>${title}</th><th style="text-align:right">回答数</th></tr></thead><tbody>`
+        + (top5.length?top5.map(([n,c],i)=>`<tr><td>${i+1}. ${esc(n)}</td><td class="num">${esc(c)}</td></tr>`).join("")
+                      :`<tr><td colspan="2" class="muted">データなし</td></tr>`) + `</tbody></table>`; };
+    $("#home-q2").innerHTML = (insMismatch?`<div class="muted" style="margin-bottom:4px">※ ${esc(mmdd(REP.insights_timing))} 実行分の示唆</div>`:"")
+      +`<div class="muted" style="margin-bottom:6px">当社が出なかった回答 ${esc(ex.nd_count??"–")} 件で、AIが挙げたもの（上位5件）</div>`
+      +`<div class="grid g2" style="gap:10px">${t5(ex.competitors,"代わりに挙がった競合")}${t5(ex.attributes,"重視された観点")}</div>`;
+  }
+
+  // 4) Q3 次の回までに何を直すか（会議で担当・期限を書き込む表）
+  $("#home-q3").innerHTML = top==null
+    ? nodata(REP.available?"insights_*.json がありません／読めません":"reports_dir が見つかりません")
+    : (!top.length ? nodata("改善アクションは 0 件です")
+      : `<table class="memo"><thead><tr><th>#</th><th>優先度</th><th>対象（事業ドメイン × 質問タイプ）</th><th>何を直すか</th>
+          <th>担当事業</th><th>担当者</th><th>期限</th><th>メモ</th></tr></thead><tbody>`
+        + top.map((a,i)=>`<tr><td>${i+1}</td><td>${esc(a.priority||"–")}</td><td>${esc(a.domain)} × ${esc(a.type)}</td>
+            <td>${esc(a.playbook||"–")}</td><td><b>${esc(ownerOf(a.domain))}</b></td>
+            <td class="blank"></td><td class="blank"></td><td class="blank"></td></tr>`).join("")
+        + `</tbody></table>`);
+
+  // 5) 詳しく見るには
+  const LINKS=[["s-runs","全回サマリー","全回の出現率の推移・回ごとのブレ・計測の断絶"],
+    ["s-compare","過去回比較","2回を選んで、出た／消えた質問と競合の増減を比べる"],
+    ["s-comp","競合共起","当社が出ない回答で、代わりに挙がる競合のランキング"],
+    ["s-context","回答分析","AIがどう答えているか（回答タイプ・重視する観点・文脈）"],
+    ["s-cross","多軸クロス集計","ドメイン×特異度などで、どこから当社が消えるか（崖）"],
+    ["s-self","自社突合","サイト掲載実績のうち、AIに言及されていないもの"],
+    ["s-url","引用URL","AIが引用したページ（Web検索型モデルの導入後に有効）"]];
+  $("#home-links").innerHTML = LINKS.map(([id,t,d])=>
+      `<button onclick='showTab(${JSON.stringify(id)});window.scrollTo(0,0)'><b>${esc(t)} ›</b><br><span class="muted">${esc(d)}</span></button>`).join("")
+    + `<div class="muted" style="grid-column:1/-1">※ monitoring に内蔵の dashboard / insights は運用者向けです。関係者はこの画面（analysis.html）だけを見れば足ります。</div>`;
+}
+window.addEventListener("beforeprint",()=>$$("#s-home details").forEach(d=>d.open=true));
+
 // ── init
 buildFilters("filters-comp","comp",renderComp);
 buildFilters("filters-context","context",renderContext);
@@ -1413,6 +1790,7 @@ FSTATE.compare = {gran:"run"};
   buildFilters("filters-cross","cross",renderCross,extra);
 })();
 renderComp(); renderContext(); renderCross(); renderUrl(); renderSelf(); renderCompare(); renderRuns();
+renderHome();
 </script>
 </body>
 </html>
