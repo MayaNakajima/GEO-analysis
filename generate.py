@@ -476,7 +476,8 @@ def build_payload(rows, files_meta, ref, cfg, reports=None):
         "reports": reports or load_reports(""),
         "home": {
             "measurement_notes": [n for n in (cfg.get("measurement_notes") or [])
-                                  if isinstance(n, dict) and n.get("date")],
+                                  if isinstance(n, dict)
+                                  and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(n.get("date", "")))],
             "domain_owner": cfg.get("domain_owner") or {},
             "grounding_model_keywords": cfg.get("grounding_model_keywords") or [],
         },
@@ -539,8 +540,13 @@ def main():
           f"{sum(len(r['competitors']) for r in rows)} mentions")
     for w in reports["warnings"]:
         print(f"[WARN] {w}")
+    n_bad = len(cfg.get("measurement_notes") or []) - len(payload["home"]["measurement_notes"])
+    if n_bad:
+        print(f"[WARN] measurement_notes のうち {n_bad} 件は date が YYYY-MM-DD でないため無視しました")
     if reports["insights_file"]:
-        latest_timing = max(r["timing"] for r in rows)
+        # ホームと同じく「有効行（エラー・空以外）のある最新タイミング」と突き合わせる
+        valid_timings = [r["timing"] for r in rows if r["atype"] not in ("error", "empty")]
+        latest_timing = max(valid_timings) if valid_timings else ""
         same = "最新回と一致" if reports["insights_timing"] == latest_timing else f"最新回 {latest_timing} と不一致"
         print(f"     insights: {reports['insights_file']}（{same}）  "
               f"index: {len(reports['index'] or [])} timings")
@@ -1620,15 +1626,16 @@ function topActions(){
     .sort((x,y)=>((PRI[x.a.priority]??9)-(PRI[y.a.priority]??9))||x.i-y.i).slice(0,3).map(o=>o.a);
 }
 function renderHome(){
-  const runs=D.runs.filter(u=>runRate(ROWS.filter(r=>r.run===u))!=null);  // 有効行のある回だけ
-  const L=runs[runs.length-1]||null, P=runs.length>1?runs[runs.length-2]:null;
-  const lr=L?ROWS.filter(r=>r.run===L):[], pr=P?ROWS.filter(r=>r.run===P):[];
+  // 「回」はタイミング単位（同一タイミングの r1/r2 はまとめる。1タイミング1回なら全回サマリーの run 表示と同値）
+  const units=D.timings.filter(u=>runRate(ROWS.filter(r=>r.timing===u))!=null);  // 有効行のある回だけ
+  const L=units[units.length-1]||null, P=units.length>1?units[units.length-2]:null;
+  const lr=L?ROWS.filter(r=>r.timing===L):[], pr=P?ROWS.filter(r=>r.timing===P):[];
   const brk=P?crossesBreak(P,L):null;
-  const lab=k=>D.run_labels[k]||k;
-  const latestTiming=lr.length?lr[0].timing:"";
+  const lab=k=>{ const n=(D.timing_runs[k]||[]).length; return (D.timing_labels[k]||k)+(n>1?`（${n}回分）`:""); };
+  const latestTiming=L||"";
   const insMismatch = REP.insights && REP.insights_timing && REP.insights_timing!==latestTiming;
   const insNote = insMismatch
-    ? `<div class="note" style="margin:0 0 10px">示唆は <b>${esc(mmdd(REP.insights_timing))} 実行分</b>に基づく（最新回 ${esc(mmdd(L))} の示唆レポートはまだありません）。</div>` : "";
+    ? `<div class="note" style="margin:0 0 10px">示唆は <b>${esc(mmdd(REP.insights_timing))} 実行分</b>に基づく（ホームの最新回 ${esc(mmdd(L))} とは異なる回です）。</div>` : "";
   $("#home-asof").innerHTML = L
     ? `最新回：<b>${esc(lab(L))}</b>${P?` ／ 前回：${esc(lab(P))}`:""} ／ 生成：${esc(DATA.meta.generated_at)}`
       + ` <button class="noprint" style="margin-left:8px" onclick="window.print()">印刷（A4横）</button>` : "";
@@ -1686,7 +1693,7 @@ function renderHome(){
       : insNote + `<div class="acts">` + top.map((a,i)=>`<div class="act">
           <div class="hd"><span class="pill pri ${priCls(a.priority)}">優先度 ${esc(a.priority||"–")}</span>
             ${i+1}. ${esc(a.domain)} × ${esc(a.type)} <span class="pill own">担当 ${esc(ownerOf(a.domain))}</span></div>
-          <div class="muted">出現率 ${esc(a.rate)}%（${esc(a.total)} 件中 ${esc(a.miss)} 件で非出現）</div>
+          <div class="muted">出現率 ${a.rate!=null?esc(a.rate)+"%":"–"}${a.total!=null?`（${esc(a.total)} 件中 ${esc(a.miss??"–")} 件で非出現）`:""}</div>
           <div class="k">打ち手（playbook）</div><div>${esc(a.playbook||"–")}</div>
           <div class="k">AIが重視している観点（cover_attributes）</div><div>${pills(a.cover_attributes)}</div>
           <div class="k">代わりに想起されている競合（beating_competitors）</div><div>${pills(a.beating_competitors,"bad")}</div>
