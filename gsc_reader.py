@@ -383,9 +383,55 @@ def _rank(v):
     return int(v) if v.isdigit() else None
 
 
-def load_checks(check_dir, keywords):
-    """{"months":[新しい順], "by_month":{月:{設問ID:{"kw":記録, "q":記録}}}, "stats":{月:{done, aio, aio_own, aio_hosts}}}
-    記録 = {rank(int|None), out(圏外), own_url, aio, aio_own, aio_hosts[], comp[], top[[順位,ドメイン,タイトル]], at, method, term}"""
+def _host(s):
+    s = str(s or "").strip().split("›")[0].strip()
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    s = s.split("/")[0].split("?")[0].split(":")[0].lower().strip(" .")
+    return s[4:] if s.startswith("www.") else s
+
+
+def load_domain_dict(path):
+    """monitoring/config/google_competitor_domains.json → {"comp":{ドメイン:会社名}, "media":{ドメイン:媒体名}}"""
+    out = {"comp": {}, "media": {}}
+    try:
+        d = json.loads(open(path, encoding="utf-8").read())
+    except Exception:
+        return out
+    for c in d.get("competitors", []):
+        for dom in c.get("domains", []):
+            out["comp"][_host(dom)] = c.get("canonical", dom)
+    for c in d.get("media", []):
+        for dom in c.get("domains", []):
+            out["media"][_host(dom)] = c.get("name", dom)
+    return out
+
+
+def classify(host, own, group, dd):
+    """(種類, 名前)。種類＝own（自社）／group（グループ）／comp（競合）／media（媒体）／other"""
+    h = _host(host)
+    hit = lambda doms: next((d for d in doms if h == d or h.endswith("." + d)), None)
+    if hit(own):
+        return "own", h
+    if hit(group):
+        return "group", h
+    d = hit(dd["comp"])
+    if d:
+        return "comp", dd["comp"][d]
+    d = hit(dd["media"])
+    if d:
+        return "media", dd["media"][d]
+    return "other", h
+
+
+def load_checks(check_dir, keywords, own=(), group=(), domain_dict=None):
+    """{"months":[新しい順], "by_month":{月:{設問ID:{"kw":記録, "q":記録}}}, "stats":{月:{...}}}
+    記録 = {rank(int|None), out(圏外), own_url, aio, aio_own, aio_group, aio_hosts[], comp[], group_rank,
+            top[[順位,ドメイン,タイトル]], at, method, term}
+    競合は記録時の判定ではなく、上位10件のドメインと今の辞書から判定し直す（辞書の追加がすぐ反映されるように）。"""
+    own = [_host(x) for x in own if x]
+    group = [_host(x) for x in group if x]
+    dd = domain_dict or {"comp": {}, "media": {}}
     by_month, stats = {}, {}
     for path in check_files(check_dir):
         month = os.path.basename(path)[len("google_check_"):-len(".csv")]
@@ -395,7 +441,8 @@ def load_checks(check_dir, keywords):
         except UnicodeDecodeError:
             text = raw.decode("cp932", errors="replace")
         m = by_month.setdefault(month, {})
-        st = stats.setdefault(month, {"done": 0, "aio": 0, "aio_own": 0, "aio_hosts": {}})
+        st = stats.setdefault(month, {"done": 0, "aio": 0, "aio_own": 0, "aio_group": 0, "group_top": 0,
+                                      "aio_hosts": {}})
         for r in csv.DictReader(io.StringIO(text, newline="")):
             term = (r.get("検索語") or "").strip()
             if not term:
@@ -405,29 +452,41 @@ def load_checks(check_dir, keywords):
             except ValueError:
                 top = []
             rank = _rank(r.get("自社最高順位"))
+            aio_hosts = [h for h in (r.get("AIO引用元") or "").split(";") if h]
+            comp, group_rank = [], None
+            for t in top[:10]:
+                kind, name = classify(t[1], own, group, dd)
+                if kind == "comp" and name not in comp:
+                    comp.append(name)
+                if kind == "group" and group_rank is None:
+                    group_rank = t[0]
+            if not top:        # 手入力の記録は、記録時の競合をそのまま使う
+                comp = [c for c in (r.get("競合（上位10件内）") or "").split(";") if c]
             rec = {"term": term, "rank": rank, "out": rank is None,
                    "own_url": (r.get("自社URL") or "").strip(),
                    "aio": (r.get("AI Overview") or "") == "あり",
                    "aio_own": (r.get("AIO自社引用") or "") == "あり",
-                   "aio_hosts": [h for h in (r.get("AIO引用元") or "").split(";") if h],
-                   "comp": [c for c in (r.get("競合（上位10件内）") or "").split(";") if c],
+                   "aio_group": any(classify(h, own, group, dd)[0] == "group" for h in aio_hosts),
+                   "aio_hosts": aio_hosts, "comp": comp, "group_rank": group_rank,
                    "top": top[:10], "at": (r.get("観測日時") or "").strip(),
                    "method": (r.get("記録方法") or "").strip()}
             st["done"] += 1
             if rec["aio"]:
                 st["aio"] += 1
-                for h in rec["aio_hosts"]:
-                    st["aio_hosts"][h] = st["aio_hosts"].get(h, 0) + 1
-            if rec["aio_own"]:
-                st["aio_own"] += 1
+                for h in aio_hosts:
+                    st["aio_hosts"][_host(h)] = st["aio_hosts"].get(_host(h), 0) + 1
+            st["aio_own"] += rec["aio_own"]
+            st["aio_group"] += rec["aio_group"]
+            st["group_top"] += group_rank is not None
             n = norm_query(term)
             for qid in [x for x in (r.get("設問ID") or "").split(";") if x]:
                 slot = "kw" if n == norm_query((keywords.get(qid) or {}).get("obs", "")) else "q"
                 m.setdefault(qid, {})[slot] = rec
     for st in stats.values():
-        st["aio_hosts"] = sorted(st["aio_hosts"].items(), key=lambda x: -x[1])[:15]
+        st["aio_hosts"] = [[h, n] + list(classify(h, own, group, dd))
+                           for h, n in sorted(st["aio_hosts"].items(), key=lambda x: -x[1])[:40]]
     return {"months": sorted(by_month, reverse=True), "by_month": by_month, "stats": stats,
-            "dir": check_dir or ""}
+            "dir": check_dir or "", "group_domains": group}
 
 
 # ────────────────────────────────────────────────────────────────
