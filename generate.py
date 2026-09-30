@@ -905,6 +905,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .q-none{background:var(--panel);}
   .q-ext{background:#f3ecfb;} .q-ext .lb{color:#7b3fa0;}
   .pill.grp{color:#7b3fa0;border-color:#7b3fa0;}
+  details.criteria{margin:0 0 16px;background:var(--card);border:1px solid var(--line);border-left:5px solid var(--good);border-radius:10px;}
+  details.criteria>summary{cursor:pointer;padding:10px 14px;font-weight:700;color:var(--good);}
+  details.criteria>div{padding:0 16px 14px;} details.criteria h3{margin:14px 0 6px;}
+  table.crit{margin:4px 0 6px;} table.crit th{background:var(--panel);position:static;} table.crit td{font-size:12.5px;line-height:1.6;}
   .acts.g-todo{grid-template-columns:repeat(2,minmax(0,1fr));}
   @media(max-width:960px){.acts.g-todo{grid-template-columns:1fr;}}
   .judge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap;}
@@ -1081,7 +1085,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <!-- Google参考値（GSC ＝ 自社サイトの Google 自然検索） -->
   <section id="s-google">
     <div class="summary" id="g-summary"></div>
-    <details class="howto"><summary>この画面の見方</summary>
+    <details class="criteria" id="g-criteria"><summary>📘 この分析の基準（データの出どころ・指標の意味・判定のルール・用語・注意点）</summary>
+      <div id="g-criteria-body"></div></details>
+    <details class="howto"><summary>この画面の見方（くわしい基準は上の「📘 この分析の基準」）</summary>
       <div class="body">Claude の出現と<b>同じ設問</b>について、Google 自然検索での自社サイトの順位（GSC＝Google Search Console）を<b>参考値</b>として並べ、
         <b>担当ごとに次にやること</b>を出します。見る順番：<b>①3つの出現率</b>（Claude・Google の AI による概要・Google 上位10件を事業領域別に比較）→
         <b>②次にやること</b>（優先度の高い打ち手と、効果の大きい設問）→ <b>③担当別</b>（自分の担当の件数）→
@@ -2059,6 +2065,10 @@ const G_SEARCH_PERIODS = arr(G.periods).filter(p=>arr(p.sites).length);
 const G_SITE_ORDER = Object.keys(G.sites||{});
 const siteLabel = s => ((G.sites||{})[s]||{}).label || s;
 const byEndDesc = (a,b) => a.end<b.end?1:(a.end>b.end?-1:0);
+HELP.g_claude = "当社が出た回答 ÷ 有効な回答（エラー・空を除く）。AI の学習データに当社が載っているかを表します。検索チェックと同じ月で数えます。";
+HELP.g_aio = "自社サイトが「AI による概要」の引用元に入った検索 ÷ 記録した検索（設問文とキーワードを1回ずつ）。Google の AI が今のウェブから答えるとき、当社サイトを使っているかを表します。";
+HELP.g_top10 = "自社サイトが検索結果の上位10件（1ページ目）に入った検索 ÷ 記録した検索。";
+HELP.g_comp = "その事業領域の設問の検索チェックで、上位10件によく出た競合（競合辞書に登録した会社）。";
 HELP.gsc = "GSC（Google Search Console）＝自社サイトが Google 検索でどう表示されたかの公式データ。自社サイトのみ・表示されたときの平均順位で、競合は見えません。毎月、前月1日〜末日で書き出したファイルを置くと月次で比較できます。";
 // やること：Claude の出現 × Google の順位 → 担当が次にやること
 const G_ACTIONS = {
@@ -2167,8 +2177,11 @@ function gClaudeWindow(sel){
   let p=null;
   if(sel==="latest") p=monthly[0]||null;
   else { const x=G_SEARCH_PERIODS.find(q=>q.key===sel); if(x && x.monthly) p=x; }
-  return p ? {start:p.start,end:p.end,label:`${p.key}（Google と同じ月）`}
-           : {start:"",end:"",label:"全期間（Google 側が月単位のファイルでないため）"};
+  if(p) return {start:p.start,end:p.end,label:`${p.key}（GSC と同じ月）`};
+  const cm=gCheckMonth(sel);
+  if(cm){ const [y,mo]=cm.split("-").map(Number); const last=new Date(y,mo,0).getDate();
+    return {start:`${cm}-01`,end:`${cm}-${String(last).padStart(2,"0")}`,label:`${cm}（検索チェックと同じ月）`}; }
+  return {start:"",end:"",label:"全期間（月単位の Google データがないため）"};
 }
 function gClaudeStats(win){ // qid -> {n, h, comp:{社名:回数}}（有効行・期間内）
   const m={};
@@ -2344,21 +2357,27 @@ function gKpiStats(list){
     it.recs.forEach(r=>{ if(seen.has(r.term)) return; seen.add(r.term); n++; if(r.aio_own) own++; if(r.rank) top++; }); });
   return {cn, ch, n, own, top, claude:gRate(ch,cn), aio:gRate(own,n), top10:gRate(top,n)};
 }
+function gTopComp(list, n){ // 設問の検索チェック（設問文・キーワード）の上位10件に出た競合の回数
+  const seen=new Set(), c={};
+  list.forEach(it=>it.recs.forEach(r=>{ if(seen.has(r.term)) return; seen.add(r.term); r.comp.forEach(x=>c[x]=(c[x]||0)+1); }));
+  return Object.entries(c).sort((a,b)=>b[1]-a[1]).slice(0,n||3);
+}
 function renderGoogleKPI(items, cm, win){
   const all=gKpiStats(items), st=G_CK.stats[cm];
   const box=(lbl,val,dt)=>`<div class="kpi-box"><div class="lbl">${lbl}</div><div class="val">${val==null?"–":val+"%"}</div><div class="dt">${dt}</div></div>`;
   const doms=[...new Set(items.map(it=>it.info.domain_label).filter(Boolean))];
-  const rows=doms.map(d=>({d, s:gKpiStats(items.filter(it=>it.info.domain_label===d))}));
+  const rows=doms.map(d=>({d, s:gKpiStats(items.filter(it=>it.info.domain_label===d)), c:gTopComp(items.filter(it=>it.info.domain_label===d))}));
   const cell=(v,c)=>`<td class="num" style="background:${heat(v)}">${v==null?"–":v+"%"}<div class="muted">${c}</div></td>`;
   $("#g-kpi").innerHTML = `<div class="kpis">`
-    + box("Claude の出現率（学習データ）", all.claude, `有効行 ${all.cn} 件中 ${all.ch} 件（${esc(win.label)}）`)
-    + box("Google の AI による概要での自社引用率", all.aio, cm?`検索 ${all.n} 件中 ${all.own} 件（${esc(cm)}・検索チェック）`:"検索チェックの記録なし")
-    + box("Google 上位10件に自社が入った率", all.top10, cm?`検索 ${all.n} 件中 ${all.top} 件（${esc(cm)}・検索チェック）`:"検索チェックの記録なし")
+    + box(`Claude の出現率（学習データ）${help("g_claude")}`, all.claude, `有効行 ${all.cn} 件中 ${all.ch} 件（${esc(win.label)}）`)
+    + box(`Google の AI による概要での自社引用率${help("g_aio")}`, all.aio, cm?`検索 ${all.n} 件中 ${all.own} 件（${esc(cm)}・検索チェック）`:"検索チェックの記録なし")
+    + box(`Google 上位10件に自社が入った率${help("g_top10")}`, all.top10, cm?`検索 ${all.n} 件中 ${all.top} 件（${esc(cm)}・検索チェック）`:"検索チェックの記録なし")
     + `</div>`
     + (st && (G_CK.group_domains||[]).length ? `<div class="muted" style="margin-top:8px">グループサイト（${esc(G_CK.group_domains.join("・"))}）：`
       + `上位10件に入った検索 <b>${st.group_top}</b> 件・AI による概要の引用元 <b>${st.aio_group}</b> 件（自社の率には含めていません）</div>` : "")
-    + (cm ? `<table style="margin-top:12px"><tr><th>事業領域</th><th>Claude の出現率</th><th>Google の AI による概要での自社引用率</th><th>Google 上位10件率</th></tr>`
-      + rows.map(({d,s})=>`<tr><td>${esc(d)}</td>${cell(s.claude,`${s.ch}/${s.cn}`)}${cell(s.aio,`${s.own}/${s.n}`)}${cell(s.top10,`${s.top}/${s.n}`)}</tr>`).join("")
+    + (cm ? `<table style="margin-top:12px"><tr><th>事業領域</th><th>Claude の出現率${help("g_claude")}</th><th>Google の AI による概要での自社引用率${help("g_aio")}</th><th>Google 上位10件率${help("g_top10")}</th><th>上位10件によく出る競合${help("g_comp")}</th></tr>`
+      + rows.map(({d,s,c})=>`<tr><td>${esc(d)}</td>${cell(s.claude,`${s.ch}/${s.cn}`)}${cell(s.aio,`${s.own}/${s.n}`)}${cell(s.top10,`${s.top}/${s.n}`)}
+        <td>${c.length?c.map(([n,v])=>`<span class="pill bad">${esc(n)} ${v}</span>`).join(" "):`<span class="muted">–</span>`}</td></tr>`).join("")
       + `</table><div class="muted" style="margin-top:6px">Google の2つは検索チェックの記録（設問文とキーワードの検索1回ずつ）で数えます。`
       + `記録 ${st.done} 件（全約270件）。AI による概要は ${st.done} 件中 ${st.aio} 件で表示。`
       + `「Google の AI には引用されるのに Claude では出ない」領域は、外部での言及を増やすと Claude にも届きやすくなります。</div>`
@@ -2396,6 +2415,7 @@ function renderGoogle(){
       +` ／ GSC${help("gsc")}：${gPeriodText(sp)||"–"} ／ Claude：${esc(win.label)}（有効行で集計）</span>${warn}`;
 
   renderGoogleKPI(items, cm, win);
+  renderGoogleCriteria(items, sp, win, cm);
   renderGoogleTodo(items, cm);
   renderGoogleOwners(items);
 
@@ -2573,6 +2593,64 @@ function renderGoogleAICheck(cm){
         <td><span class="pill ${(G_KIND[k]||G_KIND.other)[1]}">${(G_KIND[k]||G_KIND.other)[0]}</span></td><td class="num">${n}</td></tr>`).join("")}</table>`:"");
 }
 const OWN_DOMAINS_G = Object.values(G.sites||{}).map(s=>s.domain).filter(Boolean);
+function renderGoogleCriteria(items, sp, win, cm){
+  const st=G_CK.stats[cm];
+  const lastRun=ROWS.map(r=>r.date).filter(Boolean).sort().pop()||"–";
+  const lastCk=cm?Object.values(G_CK.by_month[cm]||{}).flatMap(c=>[c.kw,c.q]).filter(Boolean).map(r=>r.at).sort().pop()||"–":"–";
+  const k=gKpiStats(items);
+  const T=(head,rows)=>`<table class="crit"><tr>${head.map(h=>`<th>${h}</th>`).join("")}</tr>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join("")}</tr>`).join("")}</table>`;
+  $("#g-criteria-body").innerHTML = `
+  <h3>1. データの出どころと状態（いつの・何のデータか）</h3>`
+  + T(["データ","何を測るか","この画面で使っている範囲","更新のしかた"],[
+    ["<b>Claude 定点観測</b>","Claude（学習済みの知識で答える AI）に設問を聞き、回答に当社が出るか",
+      `${esc(win.label)}・有効な回答 ${k.cn} 件（最終実行 ${esc(lastRun)}）`,"週1回・自動（定点観測アプリ）"],
+    ["<b>Google 検索チェック</b>","同じ設問（設問文とキーワード）を人が Google で検索し、上位10件と「AI による概要」を記録",
+      cm?`${esc(cm)}・${st.done} 件記録（最終記録 ${esc(lastCk)}）`:"記録なし","毎月・手動（定点観測 GUI＋ブックマークレット）"],
+    ["<b>GSC</b>（Google Search Console）","自社サイトが Google 検索で表示された回数と平均順位（Google の公式データ）",
+      gPeriodText(sp)||"データなし","毎月・手動ダウンロード（前月1日〜末日）"],
+    ["<b>施策管理表</b>","施策の担当者・状態・実施内容（関係者が記入）",
+      G_ACT.mtime?`最終更新 ${esc(G_ACT.mtime)}・記入 ${G_ACT.rows.length} 行`:"未作成","随時（Box の Excel）"]])
+  + `<h3>2. 指標の意味（①の3つの率）</h3>`
+  + T(["指標","計算のしかた","読み方"],[
+    ["Claude の出現率","当社が出た回答 ÷ 有効な回答（エラー・空の回答を除く）",
+      "AI の学習データに当社が載っているか。サイトを直しても、次に AI が学習し直すまで動きにくい"],
+    ["Google の AI による概要での自社引用率","自社サイトが引用元に入った検索 ÷ 記録した検索（設問文とキーワードを1回ずつ）",
+      "Google の AI が「今のウェブ」から答えるとき、当社サイトを使っているか"],
+    ["Google 上位10件率","自社サイトが上位10件（1ページ目）に入った検索 ÷ 記録した検索","検索でたどり着ける位置に当社がいるか"],
+    ["GSC 平均順位（一覧の「GSC」）","その期間に表示されたときの平均順位（自社サイトのみ）","1回の検索チェックより安定した参考値。表示されなかった語は「データなし」"]])
+  + `<h3>3. 「やること」の決め方（上から順に当てはめます）</h3>`
+  + T(["順","条件","やること","考え方"],[
+    ["1","Claude の出現率が 0% より大きい",`<span class="judge q-both">維持</span>`,"すでに AI に出ている"],
+    ["2","Claude 0% で、Google の AI による概要に自社サイトが引用されている",`<span class="judge q-ext">外部での言及を増やす</span>`,
+      "ページは AI に使われている。Claude の学習データに載るよう、PR TIMES・動画など自社サイトの外での言及を増やす（Google 10位以内の設問を優先）"],
+    ["3","Claude 0% で、設問文かキーワードの検索で自社が10位以内",`<span class="judge q-geo">AI向けにページを直す</span>`,
+      "ページはあるが AI に引用されていない。社名・実績・FAQ・比較表など、AI が引用しやすい書き方にする"],
+    ["4","検索チェックでは上位10件になく、GSC の平均順位が11〜20位",`<span class="judge q-weak">あと一歩（11〜20位）</span>`,"少しの改善で1ページ目に入る"],
+    ["5","21位以下、または検索チェックで上位10件に自社なし",`<span class="judge q-weak">順位を上げる（21位〜）</span>`,"この語に答えるページを強化・新設する"],
+    ["6","Google のデータがない（検索チェック未記録・GSC にもない）",`<span class="judge q-none">検索チェック待ち</span>`,"次の検索チェックで確認する"]])
+  + `<div class="muted">Google の順位は「判定に使う Google の値」（既定＝検索チェックの設問文・キーワードのうち上位の方）で決まります。
+      「次にやること」と担当別の件数は、施策管理表で「完了」「見送り」にした設問を除いて数えます。</div>`
+  + `<h3>4. 用語</h3>`
+  + T(["用語","意味"],[
+    ["AI による概要（AI Overview）","Google の検索結果の上に出る、AI が作った回答。引用元のサイトが表示される"],
+    ["検索チェック","毎月、全設問の設問文と観測キーワードを人が Google で検索し、ブックマークレットで記録したもの（約270件）"],
+    ["圏外","検索チェックで、上位10件に自社サイトがなかった"],
+    ["自社／グループ／競合／媒体","自社＝当社サイト（onward-cd.co.jp 各サイト・onward-raffiria.shop）。グループ＝オンワードホールディングス（自社の率には含めない）。"
+      +"競合＝競合辞書に登録した会社。媒体＝PR TIMES・YouTube など情報を載せる先"],
+    ["観測キーワード ⚠","設問の意図を表すキーワード。⚠＝キーワードにしたとき設問から落ちた要素がある"],
+    ["GSC参照クエリ ≈","GSC で照合する、実際に検索されている近い語。≈＝観測キーワードより広い語で代用している"],
+    ["Claude が代わりに挙げた会社","当社が出なかった Claude の回答から自動で抜き出した社名の候補（一般語が混ざることがある）"]])
+  + `<h3>5. 注意点（参考値として見る理由）</h3>
+    <ul class="notes" style="margin:4px 0;padding-left:20px">
+      <li>検索チェックは、その日・その環境での1回分の結果です。日や端末によって順位や AI による概要は変わります。</li>
+      <li>GSC は自社サイトのデータだけです（競合は見えません）。上位1,000クエリの外や、個人が特定されうる語は出てきません。</li>
+      <li>Claude の出現率は検索チェックと同じ月にそろえています（今は ${esc(win.label)}）。1設問あたりの回答が少ないため、設問ごとの率は振れやすいです。
+        2026-08-31 より前は計測の仕方が違うため、比べられません。</li>
+      ${(()=>{ const nc=items.filter(it=>!it.cy); return nc.length?`<li>この期間に Claude の有効な回答がない設問（空の回答・エラーのみ）は「Claude 未計測」として判定から外しています：
+        ${nc.map(it=>esc(it.q)).join("、")}（${nc.length} 問）。</li>`:""; })()}
+      <li>「3. やることの決め方」は、打ち手の優先順位を決めるための目安です。最終的な判断は、設問の詳細（行をクリック）で中身を見て行ってください。</li>
+    </ul>`;
+}
 function renderGoogleActHowto(){
   $("#g-act-body").innerHTML = `施策の担当者・状態・実施内容は、Box の Excel <b>${esc(G_ACT.file||"（未設定）")}</b> に記入します
     ${G_ACT.mtime?`（最終更新 ${esc(G_ACT.mtime)}・記入 ${G_ACT.rows.length} 行）`:"（まだありません）"}。
@@ -2605,7 +2683,8 @@ function renderHomeGoogle(){ // ホーム「1) 今回の結論」の末尾に1�
       +` <span class="muted">（${gPeriodText(sp)}）</span>`;
   }
   el.insertAdjacentHTML("beforeend", `<div class="set-box">${body}
-    <button class="noprint" style="margin-left:8px" onclick="showTab('s-google')">Google参考値タブへ</button></div>`);
+    <button class="noprint" style="margin-left:8px" onclick="showTab('s-google')">Google参考値タブへ</button>
+    <button class="noprint" style="margin-left:4px" onclick="showTab('s-google');$('#g-criteria').open=true;$('#g-criteria').scrollIntoView()">分析の基準</button></div>`);
 }
 buildGoogleFilters();
 
