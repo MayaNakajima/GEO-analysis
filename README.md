@@ -6,6 +6,11 @@
 
 > 位置づけ：改善案 `ダッシュボード改善案_20260728.md` §3「rowデータ×スクレイピング分析アプリ」の実装。
 
+## データ置き場
+
+- 入力データ（GSC の Excel）：`C:\Users\612316\Box\【個人】612316_中島　麻耶\10_data`（`config.json` の `gsc_dir`。`○○｜GSC｜…xlsx` だけを読む）
+- 計測結果（`results/`・`reports/`）は GEO リポジトリの `monitoring\data\` を読むだけ（移動しない）
+
 ---
 
 ## 役割分担（関係者の入口は analysis.html だけ）
@@ -47,7 +52,7 @@ python generate.py --results-dir "C:\Users\612316\Documents\GitHub\GEO\monitorin
 
 > 実行手順の詳細（Anaconda Prompt の起動・パス一覧・トラブルシューティング）は `docs/実行手順書_v1.md` を参照。
 
-**Google参考値タブ**：毎月、GSC の Excel（6 サイト × 検索パフォーマンス／生成AI機能）を `config.json` の `gsc_dir` に置くと、
+**Google参考値タブ**：毎月、GSC の Excel（6 サイト × 検索パフォーマンス／生成AI機能）を `config.json` の `gsc_dir`（`Box\【個人】612316_中島　麻耶\10_data`）に置くと、
 Claude の出現と Google 自然検索の順位を同じ設問で並べて表示します（手順は `docs/実行手順書_v1.md` の D-2）。
 施策の担当者・状態・実施内容は Box の `GEO-analysis\Google参考値_施策管理.xlsx` に関係者が記入し、保存すると次の更新で全員の画面に反映されます（D-3）。
 
