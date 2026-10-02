@@ -334,13 +334,18 @@ def load_rows(results_dir):
 
 _ins_re = re.compile(r'insights_(\d{8})_(\d{6})(?:_r\d+)?\.json$', re.I)
 INSIGHTS_KEYS = ("generated_at", "source", "summary", "weak_cells", "extraction", "actions")
+_judge_re = re.compile(r'judge_(\d{8})_(\d{6})(?:_r\d+)?\.json$', re.I)
+# Google との突き合わせ（google）は Google参考値タブと重なるため読まない
+JUDGE_KEYS = ("generated_at", "runs", "model", "votes", "own_label", "summary",
+              "survival", "stakeholders", "reasons", "stability", "suggestions")
 
 
 def load_reports(reports_dir):
     """monitoring/data/reports から index.json と最新の insights_*.json を読む（ホームタブ用）。
     無い・壊れている場合もエラーにせず、該当部分を None にして warnings に理由を残す。"""
     rep = {"dir": reports_dir or "", "available": False, "index": None,
-           "insights": None, "insights_file": "", "insights_timing": "", "warnings": []}
+           "insights": None, "insights_file": "", "insights_timing": "",
+           "judge": None, "judge_file": "", "warnings": []}
     if not reports_dir or not os.path.isdir(reports_dir):
         rep["warnings"].append(f"reports_dir が見つかりません: {reports_dir or '（未設定）'}")
         return rep
@@ -381,6 +386,25 @@ def load_reports(reports_dir):
         break
     if not cands:
         rep["warnings"].append("insights_*.json がありません")
+
+    # 回答の読み取り判定（monitoring の answer_judge.py が出力。最新の1つ）
+    jc = []
+    for fp in glob.glob(os.path.join(reports_dir, "judge_*.json")):
+        m = _judge_re.search(os.path.basename(fp))
+        if m:
+            jc.append((f"{m.group(1)}_{m.group(2)}", os.path.basename(fp), fp))
+    for _, fn, fp in sorted(jc, reverse=True):
+        try:
+            with open(fp, encoding="utf-8-sig") as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("オブジェクトではありません")
+        except (OSError, ValueError) as e:
+            rep["warnings"].append(f"{fn} を読めません（{e}）。1つ前のファイルを試します")
+            continue
+        rep["judge"] = {k: d.get(k) for k in JUDGE_KEYS}
+        rep["judge_file"] = fn
+        break
     return rep
 
 
@@ -620,7 +644,8 @@ def _input_files(cfg, config_path):
     files = glob.glob(os.path.join(cfg.get("results_dir", ""), "results_*.csv"))
     rd = cfg.get("reports_dir", "")
     if rd:
-        files += glob.glob(os.path.join(rd, "index.json")) + glob.glob(os.path.join(rd, "insights_*.json"))
+        files += (glob.glob(os.path.join(rd, "index.json")) + glob.glob(os.path.join(rd, "insights_*.json"))
+                  + glob.glob(os.path.join(rd, "judge_*.json")))
     files += [p for p in (cfg.get("reference_md", ""), config_path, os.path.abspath(__file__)) if p]
     files += gsc_reader.input_files(cfg.get("gsc_dir", ""))
     files += [google_keywords_path(cfg), os.path.abspath(gsc_reader.__file__)]
@@ -705,6 +730,7 @@ def run(args):
               f"index: {len(reports['index'] or [])} timings")
     else:
         print("     insights: なし（ホームの該当ブロックは「データなし」表示）")
+    print(f"     judge: {reports.get('judge_file') or 'なし（推薦の読み取りタブは「データなし」表示）'}")
     n_ok = sum(1 for l in google.get("log", []) if l["status"] == "取り込み")
     ck = google.get("checks") or {}
     print(f"     google: GSC {n_ok} ファイル取り込み／期間 {len(google.get('periods', []))}／"
@@ -1128,6 +1154,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="body" id="g-log"></div></details>
   </section>
 
+  <!-- 推薦の読み取り（monitoring の回答の読み取り判定 judge_*.json を読むだけ） -->
+  <section id="s-judge">
+    <div class="summary" id="j-summary"></div>
+    <details class="howto"><summary>この画面の見方</summary>
+      <div class="body">定点観測で保存した AI の回答を、<b>別の AI（判定 AI）に1件ずつ読ませて</b>、次を判定した結果です（シエンプレの分析にならったもの）。
+        <br>・<b>回答の形</b>：候補を並べて最後に絞り込んだ（絞り込みあり）／並べただけ（一覧のみ）／候補を挙げていない（候補なし）／答えられていない（回答不能）
+        <br>・<b>挙がった会社</b>と、<b>最後のおすすめに残ったか</b>
+        <br>・各社が<b>推される理由</b>（示唆レポートと同じ12の観点から選ぶ）
+        <br>見る順番：<b>①立場別の自社の扱い</b>（推薦の形の回答で、名前が出ているか）→ <b>②推される理由</b>（競合と比べて、自社が語られていない観点）→ <b>③示唆</b>。
+        <br>Google の検索結果との突き合わせ（Claude で出ない質問を、Google で引用されているかで分ける）は「Google参考値」タブで見られます。
+        <br>※ 判定は AI によるもので、読み違いがあり得ます。件数が少ない項目は目安として見てください。</div>
+    </details>
+    <div class="grid g2" id="j-kpi"></div>
+    <h2>① 立場別の自社の扱い（推薦の形の回答）</h2>
+    <div class="card xtab" id="j-stake"></div>
+    <h2>② 会社ごとの推される理由</h2>
+    <div class="card xtab" id="j-reasons"></div>
+    <h2>③ 示唆</h2>
+    <div class="card" id="j-sug"></div>
+    <h2>④ 名前が出たあと、最後のおすすめまで残った割合</h2>
+    <div class="card xtab" id="j-surv"></div>
+  </section>
+
   <!-- P2: 引用URL -->
   <section id="s-url">
     <div class="summary" id="url-summary"></div>
@@ -1180,7 +1229,7 @@ const TABS = [
   ["s-home","ホーム"],
   ["s-comp","競合共起 (P1)"],["s-context","回答分析"],["s-cross","多軸クロス集計 (P1)"],
   ["s-compare","過去回比較"],["s-runs","全回サマリー"],["s-google","Google参考値"],
-  ["s-url","引用URL (P2)"],["s-self","自社突合 (P2)"],["s-p3","競合サイト (P3)"]
+  ["s-judge","推薦の読み取り"],["s-url","引用URL (P2)"],["s-self","自社突合 (P2)"],["s-p3","競合サイト (P3)"]
 ];
 const tabsEl = $("#tabs");
 function showTab(id){
@@ -1189,6 +1238,7 @@ function showTab(id){
   if(id==="s-comp") renderComp(); if(id==="s-context") renderContext();
   if(id==="s-cross") renderCross(); if(id==="s-compare") renderCompare();
   if(id==="s-runs") renderRuns(); if(id==="s-google") renderGoogle();
+  if(id==="s-judge") renderJudge();
 }
 TABS.forEach(([id,label],i)=>{
   const b=document.createElement("div"); b.className="tab"+(i===0?" active":""); b.textContent=label;
@@ -1994,6 +2044,12 @@ function renderHome(){
       +`<div class="muted" style="margin-bottom:6px">当社が出なかった回答 ${esc(ex.nd_count??"–")} 件で、AIが挙げたもの（上位5件）</div>`
       +`<div class="grid g2" style="gap:10px">${t5(ex.competitors,"代わりに挙がった競合")}${t5(ex.attributes,"重視された観点")}</div>`;
   }
+  // 推薦の読み取り（judge）から：競合は推されているのに当社は語られていない理由
+  const J=REP.judge, gaps=J&&J.summary?judgeGaps(J).slice(0,3):[];
+  if(gaps.length) $("#home-q2").innerHTML +=
+    `<div style="margin-top:8px"><b>競合は推されているのに、当社は語られていない理由</b>：`
+    + gaps.map(g=>`${esc(g.reason)}（競合平均 ${esc(g.avg)}% ／ 当社 ${esc(g.own)}%）`).join("、")
+    + ` <button class="noprint" onclick="showTab('s-judge');window.scrollTo(0,0)">推薦の読み取り ›</button></div>`;
 
   // 4) Q3 次の回までに何を直すか（会議で担当・期限を書き込む表）
   $("#home-q3").innerHTML = top==null
@@ -2012,6 +2068,7 @@ function renderHome(){
     ["s-comp","競合共起","当社が出ない回答で、代わりに挙がる競合のランキング"],
     ["s-context","回答分析","AIがどう答えているか（回答タイプ・重視する観点・文脈）"],
     ["s-cross","多軸クロス集計","ドメイン×特異度などで、どこから当社が消えるか（崖）"],
+    ["s-judge","推薦の読み取り","推薦の形の回答で当社が出るか・各社が推される理由（判定AIによる読み取り）"],
     ["s-self","自社突合","サイト掲載実績のうち、AIに言及されていないもの"],
     ["s-url","引用URL","AIが引用したページ（Web検索型モデルの導入後に有効）"]];
   $("#home-links").innerHTML = LINKS.map(([id,t,d])=>
@@ -2019,6 +2076,77 @@ function renderHome(){
     + `<div class="muted" style="grid-column:1/-1">※ monitoring に内蔵の dashboard / insights は運用者向けです。関係者はこの画面（analysis.html）だけを見れば足ります。</div>`;
 }
 window.addEventListener("beforeprint",()=>$$("#s-home details").forEach(d=>d.open=true));
+
+// ─────────────────────────────────────────── 推薦の読み取り（judge_*.json を読むだけ）
+const J_STATUSES=["1社だけおすすめ","他社と並んでおすすめ","おすすめから外れる","並ぶだけ（絞り込みなし）","名前が出ない"];
+const J_KINDS=["絞り込みあり","一覧のみ","候補なし","回答不能"];
+const J_MIN_N=10;  // これ未満の件数は「目安」扱い（monitoring の示唆と同じ基準）
+function judgeGaps(J){ // 競合平均より自社が20pt以上低い理由
+  const cols=arr(J.reasons&&J.reasons.columns);
+  if(!cols.length || cols[0].name!==J.own_label || cols.length<2) return [];
+  return arr(J.reasons.rows).map(r=>{ const v=arr(r.values), own=v[0]??0, cs=v.slice(1);
+      const avg=cs.length?Math.round(cs.reduce((a,b)=>a+(b||0),0)/cs.length*10)/10:0;
+      return {reason:r.reason, own, avg}; })
+    .filter(g=>g.avg-g.own>=20).sort((a,b)=>(b.avg-b.own)-(a.avg-a.own));
+}
+function renderJudge(){
+  const J=REP.judge;
+  if(!J || typeof J!=="object" || !J.summary){
+    $("#j-summary").innerHTML="推薦の読み取り";
+    ["j-kpi","j-stake","j-reasons","j-sug","j-surv"].forEach(id=>$("#"+id).innerHTML="");
+    $("#j-kpi").innerHTML=nodata(REP.available?"judge_*.json がありません（monitoring の「回答の読み取り判定」を実行すると作られます）":"reports_dir が見つかりません");
+    return;
+  }
+  const s=J.summary, st=s.own_status_total||{}, runs=arr(J.runs);
+  const absent=st["名前が出ない"]??0;
+  $("#j-summary").innerHTML=`推薦の形の回答 <b>${esc(s.rec)}</b> 件のうち、当社の名前が出ないのは <b>${esc(absent)}</b> 件（${pct(s.rec?Math.round(absent/s.rec*1000)/10:null)}）。`
+    +`<br><span class="muted">対象：${esc(runs.length)}回分（${esc(runs[0]||"–")} 〜 ${esc(runs[runs.length-1]||"–")}）／ 判定 ${esc(s.judged)} / ${esc(s.answers)} 件 ／ 判定AI ${esc(J.model||"–")} ／ 作成 ${esc(J.generated_at||"–")} ／ ${esc(REP.judge_file||"")}</span>`;
+
+  const kinds=s.kinds||{};
+  const box=(lbl,val,dt)=>`<div class="kpi-box"><div class="lbl">${lbl}</div><div class="val">${val}</div><div class="dt">${dt}</div></div>`;
+  $("#j-kpi").innerHTML=
+    box("推薦の形なのに当社の名前が出ない回答", esc(absent), `推薦の形の回答 ${esc(s.rec)} 件中`)
+    +box("回答の形", esc(kinds["一覧のみ"]??0)+` <span style="font-size:13px;font-weight:400">件が「一覧のみ」</span>`,
+         J_KINDS.map(k=>`${k} ${esc(kinds[k]??0)}`).join("・")+`（候補を並べるだけで、最後に絞り込まない回答が多い）`);
+
+  // ① 立場別
+  const SR=arr(J.stakeholders).filter(r=>r.rec_total>0);
+  $("#j-stake").innerHTML = !SR.length ? nodata("推薦の形の回答がありません")
+    : `<table><thead><tr><th>立場</th><th style="text-align:right">推薦の形の回答</th>`
+      + J_STATUSES.map(k=>`<th style="text-align:right">${esc(k)}</th>`).join("")
+      + `<th style="text-align:right">名前が出ない割合</th></tr></thead><tbody>`
+      + SR.map(r=>`<tr><td>${esc(r.stakeholder)}</td><td class="num">${esc(r.rec_total)}</td>`
+          + J_STATUSES.map(k=>`<td class="num">${esc((r.counts||{})[k]??0)}</td>`).join("")
+          + `<td class="num${r.absent_rate>=50?" delta-down":""}">${esc(r.absent_rate)}%</td></tr>`).join("")
+      + `</tbody></table><div class="muted" style="margin-top:6px">「並ぶだけ」＝候補を並べただけの回答に当社が入っていたもの。赤字は名前が出ない割合が半分以上の立場。</div>`;
+
+  // ② 推される理由
+  const cols=arr(J.reasons&&J.reasons.columns), rrows=arr(J.reasons&&J.reasons.rows);
+  const gapSet=new Set(judgeGaps(J).map(g=>g.reason));
+  $("#j-reasons").innerHTML = !cols.length ? nodata("推される理由のデータがありません")
+    : `<table><thead><tr><th>推される理由</th>`
+      + cols.map(c=>`<th style="text-align:right">${esc(c.name)}<div class="muted" style="font-weight:400">${esc(c.listed)}回${c.listed<J_MIN_N?"（少）":""}</div></th>`).join("")
+      + `</tr></thead><tbody>`
+      + rrows.map(r=>`<tr><td>${gapSet.has(r.reason)?`<b class="delta-down">${esc(r.reason)}</b>`:esc(r.reason)}</td>`
+          + arr(r.values).map(v=>`<td class="num">${esc(v)}%</td>`).join("")+`</tr>`).join("")
+      + `</tbody></table><div class="muted" style="margin-top:6px">各社の名前が出た推薦の形の回答のうち、その理由で紹介・推薦されていた割合。`
+      + `赤字＝競合平均より当社が20ポイント以上低い理由。「（少）」は${J_MIN_N}回未満で目安。</div>`;
+
+  // ③ 示唆（Google との突き合わせは Google参考値タブで扱うため除く）
+  const sug=arr(J.suggestions).filter(x=>x && x.kind!=="google");
+  $("#j-sug").innerHTML = (!sug.length ? nodata("示唆はありません")
+    : sug.map(x=>`<div class="act" style="margin-bottom:10px"><b>${esc(x.title)}</b><div>${esc(x.text)}</div></div>`).join(""))
+    + `<div class="muted">Claude で出ない質問を Google での引用状況で分けた「次にやること」は <button class="noprint" onclick="showTab('s-google')">Google参考値タブ</button> を見てください。</div>`;
+
+  // ④ 残った割合
+  const SV=arr(J.survival);
+  $("#j-surv").innerHTML = (!SV.length ? nodata("最後に絞り込む回答がありません")
+    : `<table><thead><tr><th>会社</th><th style="text-align:right">名前が出た回</th><th style="text-align:right">最後まで残った回</th><th style="text-align:right">残った割合</th></tr></thead><tbody>`
+      + SV.map(x=>`<tr${x.is_own?' style="font-weight:700"':""}><td>${esc(x.name)}</td><td class="num">${esc(x.listed)}</td><td class="num">${esc(x.kept)}</td>`
+          + `<td class="num">${esc(x.rate)}%${x.listed<J_MIN_N?' <span class="muted">（少）</span>':""}</td></tr>`).join("")+`</tbody></table>`)
+    + `<div class="muted" style="margin-top:6px">「絞り込みあり」の回答（${esc(s.pick)} 件）だけで計算。Claude は最後に絞り込む回答が少ないため、`
+    + `当社の名前が出た回数が少ないうちは目安として見てください（${J_MIN_N}回未満は「（少）」）。</div>`;
+}
 
 // ── init
 buildFilters("filters-comp","comp",renderComp);
